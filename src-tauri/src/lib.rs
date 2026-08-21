@@ -69,13 +69,16 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // 关闭窗口时隐藏而非退出，保持常驻菜单栏
+            // 关闭主窗口时隐藏窗口与 Dock 图标，状态栏继续常驻
             if let Some(window) = app.get_webview_window("main") {
-                let w = window.clone();
+                let window_for_close = window.clone();
+                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        let _ = w.hide();
+                        let _ = window_for_close.hide();
+                        #[cfg(target_os = "macos")]
+                        let _ = app_handle.set_dock_visibility(false);
                     }
                 });
             }
@@ -137,6 +140,9 @@ pub fn run() {
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
+
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
