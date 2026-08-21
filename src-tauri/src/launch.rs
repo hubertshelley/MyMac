@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 #[derive(Serialize)]
 pub struct LaunchItem {
@@ -77,7 +78,7 @@ pub fn set_launch_item(path: String, enabled: bool) -> Result<(), String> {
     }
 
     value.to_file_xml(p).map_err(|e| format!("写入失败：{e}"))?;
-    reload_launch_item(p, enabled);
+    reload_launch_item(p, enabled)?;
     Ok(())
 }
 
@@ -152,22 +153,24 @@ fn is_user_agent(path: &Path) -> bool {
     path.starts_with(&user_agents)
 }
 
-fn reload_launch_item(path: &Path, enabled: bool) {
+fn reload_launch_item(path: &Path, enabled: bool) -> Result<(), String> {
     let uid = user_id();
     if uid.is_empty() {
-        return;
+        return Err("无法获取当前用户标识".to_string());
     }
     let domain = format!("gui/{uid}");
     let path_str = path.to_string_lossy().to_string();
-    let args: Vec<&str> = if enabled {
-        vec!["bootstrap", &domain, &path_str]
+    let output = if enabled {
+        run_launchctl(["bootstrap", &domain, &path_str])?
     } else {
-        vec!["bootout", &domain, &path_str]
+        run_launchctl(["bootout", &domain, &path_str])?
     };
-    // 立即生效失败（如原本未加载）不影响结果，忽略错误
-    let _ = std::process::Command::new("launchctl")
-        .args(args)
-        .output();
+
+    if output.status.success() || (!enabled && is_service_not_loaded(&output)) {
+        Ok(())
+    } else {
+        Err(launchctl_error(&output))
+    }
 }
 
 fn user_id() -> String {
@@ -181,17 +184,98 @@ fn user_id() -> String {
 }
 
 #[tauri::command]
-pub fn delete_launch_item(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if !p.exists() {
+pub fn delete_launch_item(path: String) -> Result<String, String> {
+    let launch_path = PathBuf::from(&path);
+    if !launch_path.exists() {
         return Err("启动项不存在".to_string());
     }
-    if !is_user_agent(p) {
+    if !is_user_agent(&launch_path) {
         return Err("系统级启动项需管理员权限，暂不支持删除".to_string());
     }
-    // 先从 launchd 卸载，再移入废纸篓
-    reload_launch_item(p, false);
-    trash::delete(p).map_err(|e| format!("删除失败：{e}"))
+
+    let label = launch_item_label(&launch_path)?;
+    let uid = user_id();
+    if uid.is_empty() {
+        return Err("无法获取当前用户标识".to_string());
+    }
+    let domain = format!("gui/{uid}");
+    let service_target = format!("{domain}/{label}");
+
+    // 先持久禁用，防止仍在运行的父进程立即重新加载服务。
+    let disable = run_launchctl(["disable", &service_target])?;
+    if !disable.status.success() {
+        return Err(format!("禁用启动项失败：{}", launchctl_error(&disable)));
+    }
+
+    // 优先按服务标识卸载；找不到服务时，再按 plist 路径兜底。
+    let by_label = run_launchctl(["bootout", &service_target])?;
+    if !by_label.status.success() && !is_service_not_loaded(&by_label) {
+        let path_text = launch_path.to_string_lossy().to_string();
+        let by_path = run_launchctl(["bootout", &domain, &path_text])?;
+        if !by_path.status.success() && !is_service_not_loaded(&by_path) {
+            return Err(format!("卸载启动项失败：{}", launchctl_error(&by_path)));
+        }
+    }
+
+    trash::delete(&launch_path).map_err(|error| format!("移入废纸篓失败：{error}"))?;
+
+    // 部分软件会立即重建 LaunchAgent；等待后明确验证真实结果。
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if launch_path.exists() {
+        return Err(format!(
+            "启动项已禁用，但配置文件被所属应用重新创建：{}。请先退出对应应用后再删除。",
+            launch_path.display()
+        ));
+    }
+
+    Ok(format!("已删除启动项：{label}"))
+}
+
+fn launch_item_label(path: &Path) -> Result<String, String> {
+    let value = plist::Value::from_file(path).map_err(|error| format!("读取失败：{error}"))?;
+    value
+        .as_dictionary()
+        .and_then(|dict| dict.get("Label"))
+        .and_then(plist::Value::as_string)
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .filter(|label| !label.trim().is_empty())
+        .ok_or_else(|| "启动项缺少服务标识".to_string())
+}
+
+fn run_launchctl<const N: usize>(args: [&str; N]) -> Result<Output, String> {
+    std::process::Command::new("launchctl")
+        .args(args)
+        .output()
+        .map_err(|error| format!("无法执行 launchctl：{error}"))
+}
+
+fn is_service_not_loaded(output: &Output) -> bool {
+    let message = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+    message.contains("could not find service")
+        || message.contains("no such process")
+        || message.contains("service cannot be found")
+        || message.contains("not found")
+}
+
+fn launchctl_error(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("launchctl 返回状态 {}", output.status)
+    }
 }
 
 #[tauri::command]
