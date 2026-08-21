@@ -7,6 +7,7 @@ use tauri::{
 
 mod apps;
 mod launch;
+mod status;
 mod system;
 
 use system::{AppState, SystemMonitor};
@@ -18,9 +19,10 @@ pub fn run() {
         .setup(|app| {
             let monitor = Arc::new(Mutex::new(SystemMonitor::new()));
 
-            // 状态栏菜单项
-            let cpu_item = MenuItem::with_id(app, "cpu", "CPU：--", true, None::<&str>)?;
-            let mem_item = MenuItem::with_id(app, "mem", "内存：--", true, None::<&str>)?;
+            // 状态栏菜单项（前三项为实时信息，禁用点击）
+            let cpu_item = MenuItem::with_id(app, "cpu", "CPU：--", false, None::<&str>)?;
+            let mem_item = MenuItem::with_id(app, "mem", "内存：--", false, None::<&str>)?;
+            let net_item = MenuItem::with_id(app, "net", "网络：--", false, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "打开主面板", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 MyMac", true, None::<&str>)?;
 
@@ -29,6 +31,7 @@ pub fn run() {
                 &[
                     &cpu_item,
                     &mem_item,
+                    &net_item,
                     &PredefinedMenuItem::separator(app)?,
                     &show_item,
                     &quit_item,
@@ -36,8 +39,10 @@ pub fn run() {
             )?;
 
             let tray = TrayIconBuilder::with_id("main-tray")
+                .icon(status::render_status_icon(0.0, 0.0))
                 .tooltip("MyMac 电脑管家")
                 .menu(&menu)
+                .icon_as_template(true)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
@@ -56,10 +61,6 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            if let Some(icon) = app.default_window_icon() {
-                let _ = tray.set_icon(Some(icon.clone()));
-            }
-
             // 关闭窗口时隐藏而非退出，保持常驻菜单栏
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
@@ -71,20 +72,46 @@ pub fn run() {
                 });
             }
 
-            // 后台线程：每秒采集一次系统信息并更新菜单栏文案
+            // 后台线程：每 2 秒采集信息，更新状态栏图标与菜单文案
             let monitor_clone = monitor.clone();
+            let tray_clone = tray.clone();
             let cpu_item = cpu_item.clone();
             let mem_item = mem_item.clone();
+            let net_item = net_item.clone();
             std::thread::spawn(move || loop {
-                let (cpu, mem) = {
+                let snapshot = {
                     let mut m = monitor_clone.lock().unwrap();
                     m.refresh();
-                    let info = m.snapshot();
-                    (info.cpu_usage, info.memory_usage)
+                    m.snapshot()
                 };
-                let _ = cpu_item.set_text(format!("CPU：{cpu:.1}%"));
-                let _ = mem_item.set_text(format!("内存：{mem:.1}%"));
-                std::thread::sleep(std::time::Duration::from_secs(1));
+
+                let _ = cpu_item.set_text(format!("CPU：{:.1}%", snapshot.cpu_usage));
+                let _ = mem_item.set_text(format!(
+                    "内存：{:.1}%（{} / {}）",
+                    snapshot.memory_usage,
+                    format_bytes(snapshot.memory_used),
+                    format_bytes(snapshot.memory_total)
+                ));
+
+                let net_text = snapshot
+                    .networks
+                    .iter()
+                    .find(|n| n.received > 0 || n.transmitted > 0)
+                    .map(|n| {
+                        format!(
+                            "网络：↓ {} · ↑ {}",
+                            format_bytes(n.received),
+                            format_bytes(n.transmitted)
+                        )
+                    })
+                    .unwrap_or_else(|| "网络：暂无活动".to_string());
+                let _ = net_item.set_text(net_text);
+
+                let icon =
+                    status::render_status_icon(snapshot.cpu_usage, snapshot.memory_usage);
+                let _ = tray_clone.set_icon(Some(icon));
+
+                std::thread::sleep(std::time::Duration::from_secs(2));
             });
 
             app.manage(AppState { monitor });
@@ -108,4 +135,15 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let i = ((bytes as f64).log2() / 10.0).floor() as usize;
+    let i = i.min(UNITS.len() - 1);
+    let v = bytes as f64 / 1024f64.powi(i as i32);
+    format!("{v:.1} {}", UNITS[i])
 }
