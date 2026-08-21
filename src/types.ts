@@ -14,6 +14,8 @@ export interface SystemInfo {
   swap_used: number;
   disks: DiskInfo[];
   networks: NetworkInfo[];
+  net_down_rate: number;
+  net_up_rate: number;
 }
 
 export interface DiskInfo {
@@ -58,4 +60,5 @@ export interface StatusConfig {
   show_cpu: boolean;
   show_memory: boolean;
   show_disk: boolean;
+  show_network: boolean;
 }

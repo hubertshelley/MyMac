@@ -103,18 +103,11 @@ pub fn run() {
                     format_bytes(snapshot.memory_total)
                 ));
 
-                let net_text = snapshot
-                    .networks
-                    .iter()
-                    .find(|n| n.received > 0 || n.transmitted > 0)
-                    .map(|n| {
-                        format!(
-                            "网络：↓ {} · ↑ {}",
-                            format_bytes(n.received),
-                            format_bytes(n.transmitted)
-                        )
-                    })
-                    .unwrap_or_else(|| "网络：暂无活动".to_string());
+                let net_text = format!(
+                    "网络：↓ {} · ↑ {}",
+                    status::format_rate(snapshot.net_down_rate),
+                    status::format_rate(snapshot.net_up_rate)
+                );
                 let _ = net_item.set_text(net_text);
 
                 let icon = status::render_status_icon(&snapshot, &cfg);

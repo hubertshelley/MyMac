@@ -11,6 +11,7 @@ const config = ref<StatusConfig>({
   show_cpu: true,
   show_memory: true,
   show_disk: false,
+  show_network: false,
 });
 
 async function load() {
@@ -30,10 +31,11 @@ async function update(key: keyof StatusConfig, value: boolean) {
 }
 
 const items: { key: keyof StatusConfig; label: string; desc: string }[] = [
-  { key: "show_logo", label: "Logo 图形", desc: "在数据前显示圆环 Logo" },
+  { key: "show_logo", label: "Logo 图形", desc: "在数据前显示彩色 Logo" },
   { key: "show_cpu", label: "CPU 占用", desc: "显示处理器使用率" },
   { key: "show_memory", label: "内存占用", desc: "显示内存使用率" },
   { key: "show_disk", label: "磁盘占用", desc: "显示磁盘使用率" },
+  { key: "show_network", label: "网络速率", desc: "显示实时下载速度" },
 ];
 </script>
 

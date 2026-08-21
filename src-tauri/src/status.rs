@@ -8,17 +8,24 @@ use crate::system::SystemInfo;
 /// 图标整体高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
+const ICON_FONT_SIZE: f32 = 16.0;
 const PADDING_X: i32 = 7;
 const LOGO_SIZE: i32 = 32;
-const METRIC_ICON_SIZE: i32 = 16;
 const GAP: i32 = 9;
 const ICON_TEXT_GAP: i32 = 4;
+
+/// Material Icons 码点
+const ICON_CPU: u32 = 0xe30d; // developer_board
+const ICON_MEMORY: u32 = 0xe322; // memory
+const ICON_DISK: u32 = 0xe1db; // storage
+const ICON_NETWORK: u32 = 0xe8d5; // swap_vert
 
 #[derive(Clone, Copy)]
 enum Metric {
     Cpu,
     Memory,
     Disk,
+    Network,
 }
 
 enum Segment {
@@ -33,6 +40,14 @@ fn font() -> &'static Font {
             .or_else(|_| std::fs::read("/System/Library/Fonts/Monaco.ttf"))
             .expect("无法加载系统字体");
         Font::from_bytes(bytes, FontSettings::default()).expect("字体解析失败")
+    })
+}
+
+fn icon_font() -> &'static Font {
+    static ICON_FONT: OnceLock<Font> = OnceLock::new();
+    ICON_FONT.get_or_init(|| {
+        let bytes = include_bytes!("../fonts/MaterialIcons-Regular.ttf");
+        Font::from_bytes(&bytes[..], FontSettings::default()).expect("图标字体解析失败")
     })
 }
 
@@ -64,7 +79,20 @@ fn logo_rgba() -> &'static (Vec<u8>, u32, u32) {
     })
 }
 
-/// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 单色指标，颜色跟随主题）
+/// 将字节/秒速率格式化为简洁字符串
+pub fn format_rate(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.1}M", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.0}K", bytes_per_sec / 1_000.0)
+    } else if bytes_per_sec >= 1.0 {
+        format!("{bytes_per_sec:.0}")
+    } else {
+        "0".to_string()
+    }
+}
+
+/// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 字体图标指标）
 pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'static> {
     let dark = is_dark_mode();
     let color = if dark { 255u8 } else { 0u8 };
@@ -87,6 +115,9 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
             segments.push(Segment::Metric(Metric::Disk, format!("{:.0}%", d.usage)));
         }
     }
+    if config.show_network {
+        segments.push(Segment::Metric(Metric::Network, format_rate(info.net_down_rate)));
+    }
     if segments.is_empty() {
         segments.push(Segment::Metric(Metric::Cpu, "--".to_string()));
     }
@@ -100,7 +131,7 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
         width += match seg {
             Segment::Logo => LOGO_SIZE,
             Segment::Metric(_, text) => {
-                METRIC_ICON_SIZE + ICON_TEXT_GAP + text_width(text) as i32
+                ICON_FONT_SIZE as i32 + ICON_TEXT_GAP + text_width(text) as i32
             }
         };
     }
@@ -118,8 +149,14 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
                 x += LOGO_SIZE;
             }
             Segment::Metric(metric, text) => {
-                draw_metric_icon(&mut buf, width as u32, x, *metric, color);
-                x += METRIC_ICON_SIZE + ICON_TEXT_GAP;
+                let code = match metric {
+                    Metric::Cpu => ICON_CPU,
+                    Metric::Memory => ICON_MEMORY,
+                    Metric::Disk => ICON_DISK,
+                    Metric::Network => ICON_NETWORK,
+                };
+                draw_icon_char(&mut buf, width as u32, x, code, color);
+                x += ICON_FONT_SIZE as i32 + ICON_TEXT_GAP;
                 draw_text(&mut buf, width as u32, x, text, color);
                 x += text_width(text) as i32;
             }
@@ -136,17 +173,6 @@ fn text_width(text: &str) -> f32 {
         width += metrics.advance_width;
     }
     width
-}
-
-fn set_px(buf: &mut [u8], width: u32, x: i32, y: i32, color: u8) {
-    if x < 0 || y < 0 || x >= width as i32 || y >= ICON_HEIGHT as i32 {
-        return;
-    }
-    let idx = ((y as u32 * width + x as u32) * 4) as usize;
-    buf[idx] = color;
-    buf[idx + 1] = color;
-    buf[idx + 2] = color;
-    buf[idx + 3] = 255;
 }
 
 /// 把彩色 Logo 叠加到画布指定位置（垂直居中）
@@ -174,57 +200,28 @@ fn draw_logo(buf: &mut [u8], width: u32, x: i32) {
     }
 }
 
-/// 绘制指标小图标（单色几何图形）
-fn draw_metric_icon(buf: &mut [u8], width: u32, ox: i32, metric: Metric, color: u8) {
-    let size = METRIC_ICON_SIZE;
-    let top = (ICON_HEIGHT as i32 - size) / 2;
-    match metric {
-        Metric::Cpu => {
-            // 芯片：正方形轮廓 + 内部实心小方块
-            let half = size / 2;
-            let cx = ox + size / 2;
-            let cy = top + size / 2;
-            let border = 2;
-            for dy in -half..=half {
-                for dx in -half..=half {
-                    let is_border = dx.abs() >= half - border || dy.abs() >= half - border;
-                    if is_border {
-                        set_px(buf, width, cx + dx, cy + dy, color);
-                    }
-                }
+/// 渲染一个图标字体字形（垂直居中）
+fn draw_icon_char(buf: &mut [u8], width: u32, x: i32, code_point: u32, color: u8) {
+    let ch = char::from_u32(code_point).expect("无效图标码点");
+    let (metrics, bitmap) = icon_font().rasterize(ch, ICON_FONT_SIZE);
+    let ox = x + metrics.xmin;
+    let oy = (ICON_HEIGHT as i32 - metrics.height as i32) / 2;
+    for gy in 0..metrics.height {
+        for gx in 0..metrics.width {
+            let cov = bitmap[gy * metrics.width + gx];
+            if cov == 0 {
+                continue;
             }
-            let inner = size / 4;
-            for dy in -inner..=inner {
-                for dx in -inner..=inner {
-                    set_px(buf, width, cx + dx, cy + dy, color);
-                }
+            let px = ox + gx as i32;
+            let py = oy + gy as i32;
+            if px < 0 || py < 0 || px >= width as i32 || py >= ICON_HEIGHT as i32 {
+                continue;
             }
-        }
-        Metric::Memory => {
-            // 内存条：三个横条
-            let bar_h = 2;
-            let gap = 2;
-            for i in 0..3 {
-                let by = top + i * (bar_h + gap);
-                for dy in 0..bar_h {
-                    for dx in 0..size {
-                        set_px(buf, width, ox + dx, by + dy, color);
-                    }
-                }
-            }
-        }
-        Metric::Disk => {
-            // 硬盘：实心圆
-            let cx = ox + size / 2;
-            let cy = top + size / 2;
-            let r = size / 2;
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy <= r * r {
-                        set_px(buf, width, cx + dx, cy + dy, color);
-                    }
-                }
-            }
+            let idx = ((py as u32 * width + px as u32) * 4) as usize;
+            buf[idx] = color;
+            buf[idx + 1] = color;
+            buf[idx + 2] = color;
+            buf[idx + 3] = cov;
         }
     }
 }

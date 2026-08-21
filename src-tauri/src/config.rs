@@ -12,6 +12,8 @@ pub struct StatusConfig {
     pub show_memory: bool,
     /// 是否显示磁盘占用
     pub show_disk: bool,
+    /// 是否显示网络速率
+    pub show_network: bool,
 }
 
 impl Default for StatusConfig {
@@ -21,6 +23,7 @@ impl Default for StatusConfig {
             show_cpu: true,
             show_memory: true,
             show_disk: false,
+            show_network: false,
         }
     }
 }
