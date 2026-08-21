@@ -8,6 +8,7 @@ use crate::system::SystemInfo;
 /// 图标整体高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
+const NETWORK_FONT_SIZE: f32 = 15.0;
 const ICON_FONT_SIZE: f32 = 20.0;
 const PADDING_X: i32 = 7;
 const LOGO_SIZE: i32 = 32;
@@ -25,12 +26,12 @@ enum Metric {
     Cpu,
     Memory,
     Disk,
-    Network,
 }
 
 enum Segment {
     Logo,
     Metric(Metric, String),
+    Network { down: String, up: String },
 }
 
 fn font() -> &'static Font {
@@ -116,7 +117,10 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
         }
     }
     if config.show_network {
-        segments.push(Segment::Metric(Metric::Network, format_rate(info.net_down_rate)));
+        segments.push(Segment::Network {
+            down: format_rate(info.net_down_rate),
+            up: format_rate(info.net_up_rate),
+        });
     }
     if segments.is_empty() {
         segments.push(Segment::Metric(Metric::Cpu, "--".to_string()));
@@ -132,6 +136,13 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
             Segment::Logo => LOGO_SIZE,
             Segment::Metric(_, text) => {
                 ICON_FONT_SIZE as i32 + ICON_TEXT_GAP + text_width(text) as i32
+            }
+            Segment::Network { down, up } => {
+                let down_text = format!("↓{down}");
+                let up_text = format!("↑{up}");
+                ICON_FONT_SIZE as i32
+                    + ICON_TEXT_GAP
+                    + network_text_width(&down_text).max(network_text_width(&up_text)) as i32
             }
         };
     }
@@ -153,12 +164,20 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
                     Metric::Cpu => ICON_CPU,
                     Metric::Memory => ICON_MEMORY,
                     Metric::Disk => ICON_DISK,
-                    Metric::Network => ICON_NETWORK,
                 };
                 draw_icon_char(&mut buf, width as u32, x, code, color);
                 x += ICON_FONT_SIZE as i32 + ICON_TEXT_GAP;
                 draw_text(&mut buf, width as u32, x, text, color);
                 x += text_width(text) as i32;
+            }
+            Segment::Network { down, up } => {
+                draw_icon_char(&mut buf, width as u32, x, ICON_NETWORK, color);
+                x += ICON_FONT_SIZE as i32 + ICON_TEXT_GAP;
+                let down_text = format!("↓{down}");
+                let up_text = format!("↑{up}");
+                let text_width = network_text_width(&down_text).max(network_text_width(&up_text));
+                draw_network_text(&mut buf, width as u32, x, &up_text, &down_text, color);
+                x += text_width as i32;
             }
         }
     }
@@ -173,6 +192,37 @@ fn text_width(text: &str) -> f32 {
         width += metrics.advance_width;
     }
     width
+}
+
+fn network_text_width(text: &str) -> f32 {
+    let mut width = 0.0;
+    for ch in text.chars() {
+        let (metrics, _) = font().rasterize(ch, NETWORK_FONT_SIZE);
+        width += metrics.advance_width;
+    }
+    width
+}
+
+fn draw_network_text(
+    buf: &mut [u8],
+    width: u32,
+    x: i32,
+    up_text: &str,
+    down_text: &str,
+    color: u8,
+) {
+    // 36px 画布分成上下两行，各占 18px。
+    draw_text_at(buf, width, x, up_text, NETWORK_FONT_SIZE, 0.0, 18.0, color);
+    draw_text_at(
+        buf,
+        width,
+        x,
+        down_text,
+        NETWORK_FONT_SIZE,
+        18.0,
+        ICON_HEIGHT as f32,
+        color,
+    );
 }
 
 /// 把彩色 Logo 叠加到画布指定位置（垂直居中）
@@ -227,19 +277,42 @@ fn draw_icon_char(buf: &mut [u8], width: u32, x: i32, code_point: u32, color: u8
 }
 
 fn draw_text(buf: &mut [u8], width: u32, x: i32, text: &str, color: u8) {
+    draw_text_at(
+        buf,
+        width,
+        x,
+        text,
+        FONT_SIZE,
+        0.0,
+        ICON_HEIGHT as f32,
+        color,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text_at(
+    buf: &mut [u8],
+    width: u32,
+    x: i32,
+    text: &str,
+    font_size: f32,
+    top: f32,
+    bottom: f32,
+    color: u8,
+) {
     let font = font();
-    let line_metrics = font.vertical_line_metrics(FONT_SIZE).unwrap_or(LineMetrics {
-        ascent: FONT_SIZE * 0.8,
-        descent: -FONT_SIZE * 0.2,
+    let line_metrics = font.vertical_line_metrics(font_size).unwrap_or(LineMetrics {
+        ascent: font_size * 0.8,
+        descent: -font_size * 0.2,
         line_gap: 0.0,
-        new_line_size: FONT_SIZE,
+        new_line_size: font_size,
     });
-    // 垂直居中：baseline = (H + ascent + descent) / 2（descent 为负）
-    let baseline_y = (ICON_HEIGHT as f32 + line_metrics.ascent + line_metrics.descent) / 2.0;
+    let baseline_y =
+        (top + bottom + line_metrics.ascent + line_metrics.descent) / 2.0;
 
     let mut pen_x = x as f32;
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+        let (metrics, bitmap) = font.rasterize(ch, font_size);
         // ymin 是位图底部相对 baseline 的偏移，位图顶部 = baseline - ymin - height
         let ox = pen_x as i32 + metrics.xmin;
         let oy = baseline_y as i32 - metrics.ymin - metrics.height as i32;
