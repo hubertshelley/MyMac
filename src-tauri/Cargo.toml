@@ -26,4 +26,5 @@ sysinfo = "0.39.6"
 trash = "5.2.6"
 plist = "1.10.0"
 fontdue = "0.9.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 

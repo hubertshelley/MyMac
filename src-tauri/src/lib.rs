@@ -51,7 +51,6 @@ pub fn run() {
                 .icon(init_icon)
                 .tooltip("MyMac 电脑管家")
                 .menu(&menu)
-                .icon_as_template(true)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
@@ -119,8 +118,7 @@ pub fn run() {
                 let _ = net_item.set_text(net_text);
 
                 let icon = status::render_status_icon(&snapshot, &cfg);
-                // 使用 set_icon_with_as_template，避免 set_icon 重置 template 状态
-                let _ = tray_clone.set_icon_with_as_template(Some(icon), true);
+                let _ = tray_clone.set_icon(Some(icon));
 
                 std::thread::sleep(std::time::Duration::from_secs(2));
             });

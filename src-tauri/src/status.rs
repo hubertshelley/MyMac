@@ -5,16 +5,25 @@ use tauri::image::Image;
 use crate::config::StatusConfig;
 use crate::system::SystemInfo;
 
-/// 图标高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
+/// 图标整体高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
 const PADDING_X: i32 = 7;
-const LOGO_SIZE: i32 = 18;
+const LOGO_SIZE: i32 = 32;
+const METRIC_ICON_SIZE: i32 = 16;
 const GAP: i32 = 9;
+const ICON_TEXT_GAP: i32 = 4;
 
-enum Part {
+#[derive(Clone, Copy)]
+enum Metric {
+    Cpu,
+    Memory,
+    Disk,
+}
+
+enum Segment {
     Logo,
-    Text(String),
+    Metric(Metric, String),
 }
 
 fn font() -> &'static Font {
@@ -27,54 +36,94 @@ fn font() -> &'static Font {
     })
 }
 
-/// 根据配置与系统快照渲染状态栏图标（template 单色，黑色 + alpha）
+/// 检测系统是否处于深色模式
+fn is_dark_mode() -> bool {
+    std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim() == "Dark")
+        .unwrap_or(false)
+}
+
+/// 加载并缩放应用 Logo（彩色）
+fn logo_rgba() -> &'static (Vec<u8>, u32, u32) {
+    static LOGO: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        let bytes = include_bytes!("../icons/128x128.png");
+        let img = image::load_from_memory(bytes).expect("Logo 解码失败");
+        let img = img.resize_exact(
+            LOGO_SIZE as u32,
+            LOGO_SIZE as u32,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        (rgba.into_raw(), w, h)
+    })
+}
+
+/// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 单色指标，颜色跟随主题）
 pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'static> {
-    let mut parts: Vec<Part> = Vec::new();
+    let dark = is_dark_mode();
+    let color = if dark { 255u8 } else { 0u8 };
+
+    let mut segments: Vec<Segment> = Vec::new();
     if config.show_logo {
-        parts.push(Part::Logo);
+        segments.push(Segment::Logo);
     }
     if config.show_cpu {
-        parts.push(Part::Text(format!("{:.0}%", info.cpu_usage)));
+        segments.push(Segment::Metric(Metric::Cpu, format!("{:.0}%", info.cpu_usage)));
     }
     if config.show_memory {
-        parts.push(Part::Text(format!("{:.0}%", info.memory_usage)));
+        segments.push(Segment::Metric(
+            Metric::Memory,
+            format!("{:.0}%", info.memory_usage),
+        ));
     }
     if config.show_disk {
         if let Some(d) = info.disks.first() {
-            parts.push(Part::Text(format!("{:.0}%", d.usage)));
+            segments.push(Segment::Metric(Metric::Disk, format!("{:.0}%", d.usage)));
         }
     }
-    if parts.is_empty() {
-        parts.push(Part::Text("--".to_string()));
+    if segments.is_empty() {
+        segments.push(Segment::Metric(Metric::Cpu, "--".to_string()));
     }
 
     // 计算总宽度
     let mut width = PADDING_X * 2;
-    for (i, part) in parts.iter().enumerate() {
+    for (i, seg) in segments.iter().enumerate() {
         if i > 0 {
             width += GAP;
         }
-        width += match part {
-            Part::Logo => LOGO_SIZE,
-            Part::Text(t) => text_width(t) as i32,
+        width += match seg {
+            Segment::Logo => LOGO_SIZE,
+            Segment::Metric(_, text) => {
+                METRIC_ICON_SIZE + ICON_TEXT_GAP + text_width(text) as i32
+            }
         };
     }
 
     let mut buf = vec![0u8; (width as u32 * ICON_HEIGHT * 4) as usize];
 
     let mut x = PADDING_X;
-    for part in &parts {
-        match part {
-            Part::Logo => {
-                draw_ring(&mut buf, width as u32, x, LOGO_SIZE);
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            x += GAP;
+        }
+        match seg {
+            Segment::Logo => {
+                draw_logo(&mut buf, width as u32, x);
                 x += LOGO_SIZE;
             }
-            Part::Text(t) => {
-                draw_text(&mut buf, width as u32, x, t);
-                x += text_width(t) as i32;
+            Segment::Metric(metric, text) => {
+                draw_metric_icon(&mut buf, width as u32, x, *metric, color);
+                x += METRIC_ICON_SIZE + ICON_TEXT_GAP;
+                draw_text(&mut buf, width as u32, x, text, color);
+                x += text_width(text) as i32;
             }
         }
-        x += GAP;
     }
 
     Image::new_owned(buf, width as u32, ICON_HEIGHT)
@@ -89,32 +138,98 @@ fn text_width(text: &str) -> f32 {
     width
 }
 
-/// 渲染一个圆环（Logo 图形），内部留白
-fn draw_ring(buf: &mut [u8], width: u32, x: i32, d: i32) {
-    let cx = x + d / 2;
-    let cy = ICON_HEIGHT as i32 / 2;
-    let outer = d / 2;
-    let inner = d * 3 / 10; // 内径，形成圆环
-    let outer2 = outer * outer;
-    let inner2 = inner * inner;
-    for dy in -outer..=outer {
-        for dx in -outer..=outer {
-            let dist2 = dx * dx + dy * dy;
-            if dist2 > outer2 || dist2 < inner2 {
-                continue;
-            }
-            let px = cx + dx;
-            let py = cy + dy;
+fn set_px(buf: &mut [u8], width: u32, x: i32, y: i32, color: u8) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= ICON_HEIGHT as i32 {
+        return;
+    }
+    let idx = ((y as u32 * width + x as u32) * 4) as usize;
+    buf[idx] = color;
+    buf[idx + 1] = color;
+    buf[idx + 2] = color;
+    buf[idx + 3] = 255;
+}
+
+/// 把彩色 Logo 叠加到画布指定位置（垂直居中）
+fn draw_logo(buf: &mut [u8], width: u32, x: i32) {
+    let (logo, lw, lh) = logo_rgba();
+    let y = (ICON_HEIGHT as i32 - *lh as i32) / 2;
+    for ly in 0..*lh as i32 {
+        for lx in 0..*lw as i32 {
+            let px = x + lx;
+            let py = y + ly;
             if px < 0 || py < 0 || px >= width as i32 || py >= ICON_HEIGHT as i32 {
                 continue;
             }
-            let idx = ((py as u32 * width + px as u32) * 4) as usize;
-            buf[idx + 3] = 255;
+            let src = ((ly as u32 * *lw + lx as u32) * 4) as usize;
+            let a = logo[src + 3];
+            if a == 0 {
+                continue;
+            }
+            let dst = ((py as u32 * width + px as u32) * 4) as usize;
+            buf[dst] = logo[src];
+            buf[dst + 1] = logo[src + 1];
+            buf[dst + 2] = logo[src + 2];
+            buf[dst + 3] = a;
         }
     }
 }
 
-fn draw_text(buf: &mut [u8], width: u32, x: i32, text: &str) {
+/// 绘制指标小图标（单色几何图形）
+fn draw_metric_icon(buf: &mut [u8], width: u32, ox: i32, metric: Metric, color: u8) {
+    let size = METRIC_ICON_SIZE;
+    let top = (ICON_HEIGHT as i32 - size) / 2;
+    match metric {
+        Metric::Cpu => {
+            // 芯片：正方形轮廓 + 内部实心小方块
+            let half = size / 2;
+            let cx = ox + size / 2;
+            let cy = top + size / 2;
+            let border = 2;
+            for dy in -half..=half {
+                for dx in -half..=half {
+                    let is_border = dx.abs() >= half - border || dy.abs() >= half - border;
+                    if is_border {
+                        set_px(buf, width, cx + dx, cy + dy, color);
+                    }
+                }
+            }
+            let inner = size / 4;
+            for dy in -inner..=inner {
+                for dx in -inner..=inner {
+                    set_px(buf, width, cx + dx, cy + dy, color);
+                }
+            }
+        }
+        Metric::Memory => {
+            // 内存条：三个横条
+            let bar_h = 2;
+            let gap = 2;
+            for i in 0..3 {
+                let by = top + i * (bar_h + gap);
+                for dy in 0..bar_h {
+                    for dx in 0..size {
+                        set_px(buf, width, ox + dx, by + dy, color);
+                    }
+                }
+            }
+        }
+        Metric::Disk => {
+            // 硬盘：实心圆
+            let cx = ox + size / 2;
+            let cy = top + size / 2;
+            let r = size / 2;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx * dx + dy * dy <= r * r {
+                        set_px(buf, width, cx + dx, cy + dy, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn draw_text(buf: &mut [u8], width: u32, x: i32, text: &str, color: u8) {
     let font = font();
     let line_metrics = font.vertical_line_metrics(FONT_SIZE).unwrap_or(LineMetrics {
         ascent: FONT_SIZE * 0.8,
@@ -143,7 +258,10 @@ fn draw_text(buf: &mut [u8], width: u32, x: i32, text: &str) {
                     continue;
                 }
                 let idx = ((py as u32 * width + px as u32) * 4) as usize;
-                buf[idx + 3] = cov; // 黑色 + alpha，作为 template 图标
+                buf[idx] = color;
+                buf[idx + 1] = color;
+                buf[idx + 2] = color;
+                buf[idx + 3] = cov;
             }
         }
         pen_x += metrics.advance_width;
