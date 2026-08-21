@@ -123,10 +123,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             system::get_system_info,
             apps::list_apps,
-            apps::uninstall_app,
+            apps::scan_app_related,
+            apps::uninstall_app_items,
             launch::list_launch_items,
             launch::set_launch_item,
             launch::delete_launch_item,
+            launch::reveal_launch_item,
             config::get_status_config,
             config::set_status_config,
         ])

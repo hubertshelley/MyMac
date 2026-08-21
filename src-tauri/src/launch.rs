@@ -193,3 +193,17 @@ pub fn delete_launch_item(path: String) -> Result<(), String> {
     reload_launch_item(p, false);
     trash::delete(p).map_err(|e| format!("删除失败：{e}"))
 }
+
+#[tauri::command]
+pub fn reveal_launch_item(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err("启动项文件不存在".to_string());
+    }
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(&target)
+        .spawn()
+        .map_err(|error| format!("打开 Finder 失败：{error}"))?;
+    Ok(())
+}

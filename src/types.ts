@@ -62,3 +62,11 @@ export interface StatusConfig {
   show_disk: boolean;
   show_network: boolean;
 }
+
+export interface AppRelatedItem {
+  path: string;
+  name: string;
+  kind: string;
+  size: number;
+  is_app: boolean;
+}

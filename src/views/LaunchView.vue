@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Rocket, Lock, Search, Trash2 } from "@lucide/vue";
+import { Rocket, Lock, Search, Trash2, FolderOpen } from "@lucide/vue";
 import type { LaunchItem } from "@/types";
 import Card from "@/components/ui/Card.vue";
 import Badge from "@/components/ui/Badge.vue";
@@ -21,15 +21,24 @@ async function load() {
 onMounted(load);
 
 const filtered = computed(() => {
-  const q = search.value.trim().toLowerCase();
-  if (!q) return items.value;
-  return items.value.filter(
-    (i) =>
-      i.name.toLowerCase().includes(q) ||
-      i.program.toLowerCase().includes(q) ||
-      i.location.toLowerCase().includes(q)
-  );
+  const terms = search.value
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!terms.length) return items.value;
+
+  return items.value.filter((item) => {
+    const haystack = [item.name, item.program, item.path, item.location]
+      .join("\n")
+      .toLocaleLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
 });
+
+function handleSearch(event: Event) {
+  search.value = (event.target as HTMLInputElement).value;
+}
 
 async function toggle(item: LaunchItem, enabled: boolean) {
   try {
@@ -37,6 +46,21 @@ async function toggle(item: LaunchItem, enabled: boolean) {
     item.enabled = enabled;
   } catch (e) {
     window.alert(String(e));
+  }
+}
+
+async function reveal(item: LaunchItem) {
+  try {
+    // 优先定位实际运行程序，不存在时定位启动项 plist。
+    await invoke("reveal_launch_item", {
+      path: item.program || item.path,
+    });
+  } catch {
+    try {
+      await invoke("reveal_launch_item", { path: item.path });
+    } catch (e) {
+      window.alert(String(e));
+    }
   }
 }
 
@@ -63,13 +87,16 @@ async function remove(item: LaunchItem) {
       <div class="relative flex-1">
         <Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <input
-          v-model="search"
-          type="text"
-          placeholder="搜索启动项…"
+          :value="search"
+          type="search"
+          placeholder="按名称、程序路径或位置搜索…"
           class="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          @input="handleSearch"
         />
       </div>
-      <span class="text-xs text-muted-foreground">共 {{ items.length }} 项</span>
+      <span class="whitespace-nowrap text-xs text-muted-foreground">
+        {{ search.trim() ? `${filtered.length} / ${items.length} 项` : `共 ${items.length} 项` }}
+      </span>
     </div>
 
     <Card v-if="loading" class="flex items-center justify-center gap-2 p-10 text-sm text-muted-foreground">
@@ -80,7 +107,7 @@ async function remove(item: LaunchItem) {
       <ul class="divide-y divide-border">
         <li
           v-for="item in filtered"
-          :key="item.id"
+          :key="`${item.path}-${item.id}`"
           class="flex items-center gap-3 px-4 py-3"
         >
           <div class="min-w-0 flex-1">
@@ -90,15 +117,30 @@ async function remove(item: LaunchItem) {
             </div>
             <div class="truncate text-xs text-muted-foreground">{{ item.program || item.path }}</div>
           </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="text-muted-foreground"
+            title="在 Finder 中显示"
+            @click="reveal(item)"
+          >
+            <FolderOpen />
+          </Button>
           <div v-if="item.is_user" class="flex items-center gap-3">
             <span class="text-xs text-muted-foreground">
               {{ item.enabled ? "已启用" : "已禁用" }}
             </span>
             <Switch
               :model-value="item.enabled"
-              @update:model-value="(v) => toggle(item, v)"
+              @update:model-value="(value) => toggle(item, value)"
             />
-            <Button variant="ghost" size="icon" class="text-muted-foreground hover:text-destructive" @click="remove(item)">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="text-muted-foreground hover:text-destructive"
+              title="删除启动项"
+              @click="remove(item)"
+            >
               <Trash2 />
             </Button>
           </div>
