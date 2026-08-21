@@ -6,6 +6,7 @@ use tauri::{
 };
 
 mod apps;
+mod config;
 mod launch;
 mod status;
 mod system;
@@ -18,6 +19,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let monitor = Arc::new(Mutex::new(SystemMonitor::new()));
+            let config = Arc::new(Mutex::new(config::load_config()));
+
+            // 初始状态栏图标
+            let init_icon = {
+                let m = monitor.lock().unwrap();
+                let cfg = config.lock().unwrap();
+                status::render_status_icon(&m.snapshot(), &cfg)
+            };
 
             // 状态栏菜单项（前三项为实时信息，禁用点击）
             let cpu_item = MenuItem::with_id(app, "cpu", "CPU：--", false, None::<&str>)?;
@@ -39,7 +48,7 @@ pub fn run() {
             )?;
 
             let tray = TrayIconBuilder::with_id("main-tray")
-                .icon(status::render_status_icon(0.0, 0.0))
+                .icon(init_icon)
                 .tooltip("MyMac 电脑管家")
                 .menu(&menu)
                 .icon_as_template(true)
@@ -74,6 +83,7 @@ pub fn run() {
 
             // 后台线程：每 2 秒采集信息，更新状态栏图标与菜单文案
             let monitor_clone = monitor.clone();
+            let config_clone = config.clone();
             let tray_clone = tray.clone();
             let cpu_item = cpu_item.clone();
             let mem_item = mem_item.clone();
@@ -84,6 +94,7 @@ pub fn run() {
                     m.refresh();
                     m.snapshot()
                 };
+                let cfg = config_clone.lock().unwrap().clone();
 
                 let _ = cpu_item.set_text(format!("CPU：{:.1}%", snapshot.cpu_usage));
                 let _ = mem_item.set_text(format!(
@@ -107,14 +118,14 @@ pub fn run() {
                     .unwrap_or_else(|| "网络：暂无活动".to_string());
                 let _ = net_item.set_text(net_text);
 
-                let icon =
-                    status::render_status_icon(snapshot.cpu_usage, snapshot.memory_usage);
-                let _ = tray_clone.set_icon(Some(icon));
+                let icon = status::render_status_icon(&snapshot, &cfg);
+                // 使用 set_icon_with_as_template，避免 set_icon 重置 template 状态
+                let _ = tray_clone.set_icon_with_as_template(Some(icon), true);
 
                 std::thread::sleep(std::time::Duration::from_secs(2));
             });
 
-            app.manage(AppState { monitor });
+            app.manage(AppState { monitor, config });
 
             Ok(())
         })
@@ -124,6 +135,8 @@ pub fn run() {
             apps::uninstall_app,
             launch::list_launch_items,
             launch::set_launch_item,
+            config::get_status_config,
+            config::set_status_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

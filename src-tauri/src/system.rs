@@ -145,6 +145,7 @@ fn build_snapshot(sys: &mut System, networks: &Networks, disks: &Disks) -> Syste
 
 pub struct AppState {
     pub monitor: Arc<Mutex<SystemMonitor>>,
+    pub config: Arc<Mutex<crate::config::StatusConfig>>,
 }
 
 #[tauri::command]

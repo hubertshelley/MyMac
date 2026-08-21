@@ -2,12 +2,20 @@ use fontdue::{Font, FontSettings, LineMetrics};
 use std::sync::OnceLock;
 use tauri::image::Image;
 
+use crate::config::StatusConfig;
+use crate::system::SystemInfo;
+
 /// 图标高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
 const PADDING_X: i32 = 7;
-const DOT_DIAMETER: i32 = 12;
+const LOGO_SIZE: i32 = 18;
 const GAP: i32 = 9;
+
+enum Part {
+    Logo,
+    Text(String),
+}
 
 fn font() -> &'static Font {
     static FONT: OnceLock<Font> = OnceLock::new();
@@ -19,26 +27,57 @@ fn font() -> &'static Font {
     })
 }
 
-/// 根据 CPU / 内存占用渲染状态栏图标（template 单色，黑色 + alpha）
-pub fn render_status_icon(cpu: f32, mem: f32) -> Image<'static> {
-    let cpu_text = format!("{cpu:.0}%");
-    let mem_text = format!("{mem:.0}%");
+/// 根据配置与系统快照渲染状态栏图标（template 单色，黑色 + alpha）
+pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'static> {
+    let mut parts: Vec<Part> = Vec::new();
+    if config.show_logo {
+        parts.push(Part::Logo);
+    }
+    if config.show_cpu {
+        parts.push(Part::Text(format!("{:.0}%", info.cpu_usage)));
+    }
+    if config.show_memory {
+        parts.push(Part::Text(format!("{:.0}%", info.memory_usage)));
+    }
+    if config.show_disk {
+        if let Some(d) = info.disks.first() {
+            parts.push(Part::Text(format!("{:.0}%", d.usage)));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(Part::Text("--".to_string()));
+    }
 
-    let w_cpu = text_width(&cpu_text) as i32;
-    let w_mem = text_width(&mem_text) as i32;
+    // 计算总宽度
+    let mut width = PADDING_X * 2;
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            width += GAP;
+        }
+        width += match part {
+            Part::Logo => LOGO_SIZE,
+            Part::Text(t) => text_width(t) as i32,
+        };
+    }
 
-    let width = (PADDING_X * 2 + DOT_DIAMETER + GAP * 2 + w_cpu + w_mem) as u32;
-    let mut buf = vec![0u8; (width * ICON_HEIGHT * 4) as usize];
+    let mut buf = vec![0u8; (width as u32 * ICON_HEIGHT * 4) as usize];
 
-    draw_dot(&mut buf, width, PADDING_X, DOT_DIAMETER);
+    let mut x = PADDING_X;
+    for part in &parts {
+        match part {
+            Part::Logo => {
+                draw_ring(&mut buf, width as u32, x, LOGO_SIZE);
+                x += LOGO_SIZE;
+            }
+            Part::Text(t) => {
+                draw_text(&mut buf, width as u32, x, t);
+                x += text_width(t) as i32;
+            }
+        }
+        x += GAP;
+    }
 
-    let x_cpu = PADDING_X + DOT_DIAMETER + GAP;
-    draw_text(&mut buf, width, x_cpu, &cpu_text);
-
-    let x_mem = x_cpu + w_cpu + GAP;
-    draw_text(&mut buf, width, x_mem, &mem_text);
-
-    Image::new_owned(buf, width, ICON_HEIGHT)
+    Image::new_owned(buf, width as u32, ICON_HEIGHT)
 }
 
 fn text_width(text: &str) -> f32 {
@@ -50,13 +89,18 @@ fn text_width(text: &str) -> f32 {
     width
 }
 
-fn draw_dot(buf: &mut [u8], width: u32, x: i32, d: i32) {
+/// 渲染一个圆环（Logo 图形），内部留白
+fn draw_ring(buf: &mut [u8], width: u32, x: i32, d: i32) {
     let cx = x + d / 2;
     let cy = ICON_HEIGHT as i32 / 2;
-    let r = d / 2;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy > r * r {
+    let outer = d / 2;
+    let inner = d * 3 / 10; // 内径，形成圆环
+    let outer2 = outer * outer;
+    let inner2 = inner * inner;
+    for dy in -outer..=outer {
+        for dx in -outer..=outer {
+            let dist2 = dx * dx + dy * dy;
+            if dist2 > outer2 || dist2 < inner2 {
                 continue;
             }
             let px = cx + dx;
@@ -84,7 +128,7 @@ fn draw_text(buf: &mut [u8], width: u32, x: i32, text: &str) {
     let mut pen_x = x as f32;
     for ch in text.chars() {
         let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
-        // 位图顶部坐标：ymin 是位图底部相对 baseline 的偏移
+        // ymin 是位图底部相对 baseline 的偏移，位图顶部 = baseline - ymin - height
         let ox = pen_x as i32 + metrics.xmin;
         let oy = baseline_y as i32 - metrics.ymin - metrics.height as i32;
         for gy in 0..metrics.height {

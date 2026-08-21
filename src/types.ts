@@ -52,3 +52,10 @@ export interface LaunchItem {
   is_user: boolean;
   location: string;
 }
+
+export interface StatusConfig {
+  show_logo: boolean;
+  show_cpu: boolean;
+  show_memory: boolean;
+  show_disk: boolean;
+}
