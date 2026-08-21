@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Search, Trash2, Package } from "@lucide/vue";
 import type { AppInfo } from "@/types";
 import { formatBytes } from "@/lib/format";
@@ -40,7 +41,22 @@ async function load() {
   loading.value = false;
 }
 
-onMounted(load);
+let unlistenSize: (() => void) | undefined;
+
+onMounted(async () => {
+  await load();
+  unlistenSize = await listen<AppInfo>("app-size", (event) => {
+    const updated = event.payload;
+    const target = apps.value.find((a) => a.id === updated.id);
+    if (target) {
+      target.size = updated.size;
+    }
+  });
+});
+
+onUnmounted(() => {
+  unlistenSize?.();
+});
 
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
@@ -119,7 +135,7 @@ async function uninstall(app: AppInfo) {
               <Badge v-if="app.is_system" variant="secondary">系统</Badge>
             </div>
             <div class="truncate text-xs text-muted-foreground">
-              {{ app.version || "未知版本" }} · {{ formatBytes(app.size) }}
+              {{ app.version || "未知版本" }} · {{ app.size > 0 ? formatBytes(app.size) : "计算中…" }}
             </div>
           </div>
           <Button

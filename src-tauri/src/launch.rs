@@ -179,3 +179,17 @@ fn user_id() -> String {
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
+
+#[tauri::command]
+pub fn delete_launch_item(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err("启动项不存在".to_string());
+    }
+    if !is_user_agent(p) {
+        return Err("系统级启动项需管理员权限，暂不支持删除".to_string());
+    }
+    // 先从 launchd 卸载，再移入废纸篓
+    reload_launch_item(p, false);
+    trash::delete(p).map_err(|e| format!("删除失败：{e}"))
+}

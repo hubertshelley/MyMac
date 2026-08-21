@@ -8,7 +8,7 @@ use crate::system::SystemInfo;
 /// 图标整体高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
-const ICON_FONT_SIZE: f32 = 16.0;
+const ICON_FONT_SIZE: f32 = 20.0;
 const PADDING_X: i32 = 7;
 const LOGO_SIZE: i32 = 32;
 const GAP: i32 = 9;

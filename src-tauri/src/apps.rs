@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tauri::Emitter;
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct AppInfo {
     pub id: String,
     pub name: String,
@@ -11,19 +12,28 @@ pub struct AppInfo {
     pub is_system: bool,
 }
 
+/// 列出可卸载的应用（不含系统应用）。大小在后台异步计算后通过 `app-size` 事件推送。
 #[tauri::command]
-pub fn list_apps() -> Vec<AppInfo> {
+pub fn list_apps(app: tauri::AppHandle) -> Vec<AppInfo> {
     let mut apps: Vec<AppInfo> = Vec::new();
 
     scan_dir(Path::new("/Applications"), false, &mut apps);
-    scan_dir(Path::new("/System/Applications"), true, &mut apps);
-
     if let Ok(home) = std::env::var("HOME") {
         let user_apps = PathBuf::from(home).join("Applications");
         scan_dir(&user_apps, false, &mut apps);
     }
 
     apps.sort_by_key(|a| a.name.to_lowercase());
+
+    // 后台逐个计算应用大小，通过事件推送，避免阻塞列表展示
+    let apps_clone = apps.clone();
+    std::thread::spawn(move || {
+        for mut a in apps_clone {
+            a.size = dir_size(Path::new(&a.path));
+            let _ = app.emit("app-size", &a);
+        }
+    });
+
     apps
 }
 
@@ -97,7 +107,7 @@ fn build_app_info(app_path: &Path, is_system: bool) -> AppInfo {
         name,
         path: app_path.to_string_lossy().to_string(),
         version,
-        size: dir_size(app_path),
+        size: 0, // 后台异步计算
         is_system,
     }
 }

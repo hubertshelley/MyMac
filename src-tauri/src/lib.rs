@@ -126,6 +126,7 @@ pub fn run() {
             apps::uninstall_app,
             launch::list_launch_items,
             launch::set_launch_item,
+            launch::delete_launch_item,
             config::get_status_config,
             config::set_status_config,
         ])

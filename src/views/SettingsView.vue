@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, type Component } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { SlidersHorizontal } from "@lucide/vue";
+import { Gauge, Cpu, MemoryStick, HardDrive, Wifi } from "@lucide/vue";
 import type { StatusConfig } from "@/types";
 import Card from "@/components/ui/Card.vue";
 import Switch from "@/components/ui/Switch.vue";
@@ -30,12 +30,12 @@ async function update(key: keyof StatusConfig, value: boolean) {
   }
 }
 
-const items: { key: keyof StatusConfig; label: string; desc: string }[] = [
-  { key: "show_logo", label: "Logo 图形", desc: "在数据前显示彩色 Logo" },
-  { key: "show_cpu", label: "CPU 占用", desc: "显示处理器使用率" },
-  { key: "show_memory", label: "内存占用", desc: "显示内存使用率" },
-  { key: "show_disk", label: "磁盘占用", desc: "显示磁盘使用率" },
-  { key: "show_network", label: "网络速率", desc: "显示实时下载速度" },
+const items: { key: keyof StatusConfig; label: string; desc: string; icon: Component }[] = [
+  { key: "show_logo", label: "Logo 图形", desc: "在数据前显示彩色 Logo", icon: Gauge },
+  { key: "show_cpu", label: "CPU 占用", desc: "显示处理器使用率", icon: Cpu },
+  { key: "show_memory", label: "内存占用", desc: "显示内存使用率", icon: MemoryStick },
+  { key: "show_disk", label: "磁盘占用", desc: "显示磁盘使用率", icon: HardDrive },
+  { key: "show_network", label: "网络速率", desc: "显示实时下载速度", icon: Wifi },
 ];
 </script>
 
@@ -52,11 +52,13 @@ const items: { key: keyof StatusConfig; label: string; desc: string }[] = [
           :key="item.key"
           class="flex items-center gap-3 px-4 py-3"
         >
+          <div
+            class="flex size-9 shrink-0 items-center justify-center rounded-md bg-secondary"
+          >
+            <component :is="item.icon" class="size-5 text-muted-foreground" />
+          </div>
           <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <SlidersHorizontal class="size-4 text-muted-foreground" />
-              <span class="text-sm font-medium">{{ item.label }}</span>
-            </div>
+            <div class="text-sm font-medium">{{ item.label }}</div>
             <div class="text-xs text-muted-foreground">{{ item.desc }}</div>
           </div>
           <Switch
@@ -68,7 +70,7 @@ const items: { key: keyof StatusConfig; label: string; desc: string }[] = [
     </Card>
 
     <div class="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-      提示：状态栏图标为单色模板样式，会自动适配菜单栏的深浅色主题。
+      提示：状态栏为彩色 Logo 加单色指标图标，图标与数字会跟随菜单栏深浅色主题自动切换。
     </div>
   </div>
 </template>
