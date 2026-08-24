@@ -168,14 +168,45 @@ fn thumbnail_data_url(file: &str) -> Option<String> {
     Some(format!("data:image/png;base64,{b64}"))
 }
 
+/// 已保存到磁盘的图片记录（锁外预处理结果）
+pub struct PreparedImage {
+    pub id: String,
+    pub fp: String,
+    pub orig_file: String,
+    pub thumb_file: String,
+    pub size: (u32, u32),
+}
+
 /// 新捕获的剪贴板内容
 pub enum NewContent {
     Text(String),
-    Image {
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    },
+    Image(PreparedImage),
+}
+
+/// 计算图片内容指纹
+pub fn image_fingerprint(width: usize, height: usize, bytes: &[u8]) -> String {
+    fingerprint_image(width, height, bytes)
+}
+
+/// 锁外预处理：保存图片原图与缩略图（耗时操作，勿在持锁时调用）
+pub fn prepare_image(width: u32, height: u32, rgba: &[u8]) -> Option<PreparedImage> {
+    let id = scru128::new_string();
+    let fp = fingerprint_image(width as usize, height as usize, rgba);
+    let (orig, thumb, size) = save_image_files(&id, width, height, rgba).ok()?;
+    Some(PreparedImage {
+        id,
+        fp,
+        orig_file: orig,
+        thumb_file: thumb,
+        size,
+    })
+}
+
+/// 清理预处理产生的图片文件（内容重复时调用）
+fn remove_prepared_files(p: &PreparedImage) {
+    let dir = images_dir();
+    let _ = std::fs::remove_file(dir.join(&p.orig_file));
+    let _ = std::fs::remove_file(dir.join(&p.thumb_file));
 }
 
 /// 将剪贴板新内容写入历史（去重、置顶、截断上限），返回是否发生变化
@@ -186,13 +217,15 @@ pub fn upsert(
 ) -> bool {
     let fp = match &content {
         NewContent::Text(t) => fingerprint_text(t),
-        NewContent::Image { width, height, rgba } => {
-            fingerprint_image(*width as usize, *height as usize, rgba)
-        }
+        NewContent::Image(p) => p.fp.clone(),
     };
     let changed = last_seen.as_deref() != Some(fp.as_str());
     *last_seen = Some(fp.clone());
     if !changed {
+        // 内容与上次相同：若本次已保存图片文件则清理
+        if let NewContent::Image(p) = &content {
+            remove_prepared_files(p);
+        }
         return false;
     }
 
@@ -221,31 +254,28 @@ pub fn upsert(
                 );
             }
         }
-        NewContent::Image { width, height, rgba } => {
-            // 全局去重：历史中已存在相同图片则置顶
-            if let Some(pos) = items.iter().position(|i| i.image_fp.as_deref() == Some(fp.as_str()))
+        NewContent::Image(p) => {
+            // 全局去重：历史中已存在相同图片则置顶，并清理本次保存的文件
+            if let Some(pos) = items
+                .iter()
+                .position(|i| i.image_fp.as_deref() == Some(p.fp.as_str()))
             {
+                remove_prepared_files(&p);
                 let mut item = items.remove(pos);
                 item.created_at = now_str();
                 items.insert(0, item);
             } else {
-                let id = scru128::new_string();
-                let saved = save_image_files(&id, width, height, &rgba);
-                let (orig, thumb, size) = match saved {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
                 items.insert(
                     0,
                     ClipItem {
-                        id,
+                        id: p.id,
                         content: String::new(),
                         created_at: now_str(),
                         kind: ClipKind::Image,
-                        image_file: Some(orig),
-                        thumb_file: Some(thumb),
-                        image_size: Some(size),
-                        image_fp: Some(fp),
+                        image_file: Some(p.orig_file),
+                        thumb_file: Some(p.thumb_file),
+                        image_size: Some(p.size),
+                        image_fp: Some(p.fp),
                     },
                 );
             }

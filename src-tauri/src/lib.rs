@@ -72,18 +72,27 @@ pub fn run() {
                     move |app, event| match event.id.as_ref() {
                         "show" => show_main_window(app),
                         "quit" => app.exit(0),
+                        // 剪贴板读写与菜单重建在后台线程执行，避免阻塞主线程
                         "clear-clip" => {
-                            let state = app.state::<ClipboardState>();
-                            let _ = clipboard::clear_history(state.inner());
-                            rebuild_clip_menu(app, &clip_submenu, state.inner());
-                            let _ = app.emit("clip-history-changed", ());
+                            let app = app.clone();
+                            let submenu = clip_submenu.clone();
+                            std::thread::spawn(move || {
+                                let state = app.state::<ClipboardState>();
+                                let _ = clipboard::clear_history(state.inner());
+                                rebuild_clip_menu(&app, &submenu, state.inner());
+                                let _ = app.emit("clip-history-changed", ());
+                            });
                         }
                         id if id.starts_with("clip-item-") => {
-                            let clip_id = id.trim_start_matches("clip-item-");
-                            let state = app.state::<ClipboardState>();
-                            let _ = clipboard::copy_to_clipboard_and_top(state.inner(), clip_id);
-                            rebuild_clip_menu(app, &clip_submenu, state.inner());
-                            let _ = app.emit("clip-history-changed", ());
+                            let clip_id = id.trim_start_matches("clip-item-").to_string();
+                            let app = app.clone();
+                            let submenu = clip_submenu.clone();
+                            std::thread::spawn(move || {
+                                let state = app.state::<ClipboardState>();
+                                let _ = clipboard::copy_to_clipboard_and_top(state.inner(), &clip_id);
+                                rebuild_clip_menu(&app, &submenu, state.inner());
+                                let _ = app.emit("clip-history-changed", ());
+                            });
                         }
                         _ => {}
                     }
@@ -170,11 +179,28 @@ pub fn run() {
                         if img.bytes.is_empty() {
                             None
                         } else {
-                            Some(clipboard::NewContent::Image {
-                                width: img.width as u32,
-                                height: img.height as u32,
-                                rgba: img.bytes.into_owned(),
-                            })
+                            // 快速检查：内容与上次一致则跳过，避免重复保存图片文件
+                            let fp = clipboard::image_fingerprint(
+                                img.width,
+                                img.height,
+                                &img.bytes,
+                            );
+                            let already_seen = {
+                                let state = watcher_app.state::<ClipboardState>();
+                                let last_seen = state.last_seen.lock().unwrap();
+                                last_seen.as_deref() == Some(fp.as_str())
+                            };
+                            if already_seen {
+                                None
+                            } else {
+                                // 锁外保存图片文件（解码、缩略图生成耗时，避免持锁）
+                                clipboard::prepare_image(
+                                    img.width as u32,
+                                    img.height as u32,
+                                    &img.bytes,
+                                )
+                                .map(clipboard::NewContent::Image)
+                            }
                         }
                     } else {
                         None
@@ -230,14 +256,25 @@ pub fn run() {
 }
 
 /// 重建状态栏「粘贴板历史」子菜单内容
+/// 注意：子菜单增删操作会同步派发到主线程执行，因此必须先克隆数据、
+/// 释放 items 锁后再操作，避免与主线程的菜单事件处理形成死锁。
 fn rebuild_clip_menu(
     app: &tauri::AppHandle,
     submenu: &Submenu<tauri::Wry>,
     state: &ClipboardState,
 ) {
-    let items = state.items.lock().unwrap();
+    // 1. 克隆菜单数据（短暂持锁，克隆后立即释放）
+    let menu_data: Vec<(String, String)> = {
+        let items = state.items.lock().unwrap();
+        items
+            .iter()
+            .take(clipboard::TRAY_SHOW_ITEMS)
+            .map(|i| (i.id.clone(), clipboard::menu_label(i)))
+            .collect()
+    };
+    let empty = menu_data.is_empty();
 
-    // 移除子菜单中现有项，再整体重建
+    // 2. 释放锁后操作子菜单（以下调用会 dispatch 到主线程）
     if let Ok(existing) = submenu.items() {
         for item in existing {
             let _ = submenu.remove(&item);
@@ -245,19 +282,18 @@ fn rebuild_clip_menu(
     }
 
     let mut owned: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
-
-    if items.is_empty() {
+    if empty {
         if let Ok(mi) =
             MenuItem::with_id(app, "clip-empty", "暂无记录", false, None::<&str>)
         {
             owned.push(Box::new(mi));
         }
     } else {
-        for item in items.iter().take(clipboard::TRAY_SHOW_ITEMS) {
+        for (id, label) in menu_data {
             if let Ok(mi) = MenuItem::with_id(
                 app,
-                format!("clip-item-{}", item.id),
-                clipboard::menu_label(item),
+                format!("clip-item-{id}"),
+                label,
                 true,
                 None::<&str>,
             ) {
