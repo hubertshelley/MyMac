@@ -71,8 +71,13 @@ export interface AppRelatedItem {
   is_app: boolean;
 }
 
+export type ClipKind = "text" | "image";
+
 export interface ClipItem {
   id: string;
   content: string;
   created_at: string;
+  kind: ClipKind;
+  image_size: [number, number] | null;
+  thumbnail: string | null;
 }

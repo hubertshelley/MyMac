@@ -23,10 +23,11 @@ pub fn run() {
             let monitor = Arc::new(Mutex::new(SystemMonitor::new()));
             let config = Arc::new(Mutex::new(config::load_config()));
 
-            // 剪贴板历史状态（启动时加载本地记录）
+            // 剪贴板历史状态（启动时加载本地记录，并记录当前剪贴板指纹，
+            // 避免重启后残留内容被当作新记录重新写入）
             let clip_state = ClipboardState {
                 items: Mutex::new(clipboard::load_history()),
-                last_seen: Mutex::new(None),
+                last_seen: Mutex::new(clipboard::current_clipboard_fingerprint()),
             };
 
             // 初始状态栏图标
@@ -158,24 +159,44 @@ pub fn run() {
                     Err(_) => return,
                 };
                 loop {
-                    if let Ok(text) = cb.get_text() {
-                        if !text.trim().is_empty() {
-                            let state = watcher_app.state::<ClipboardState>();
-                            let changed = {
-                                let mut items = state.items.lock().unwrap();
-                                let mut last_seen = state.last_seen.lock().unwrap();
-                                let changed = clipboard::upsert(&mut items, &text, &mut last_seen);
-                                if changed {
-                                    let snapshot = items.clone();
-                                    drop(items);
-                                    let _ = clipboard::save_history(&snapshot);
-                                }
-                                changed
-                            };
+                    // 优先读取文本，无文本时读取图片
+                    let content = if let Ok(text) = cb.get_text() {
+                        if text.trim().is_empty() {
+                            None
+                        } else {
+                            Some(clipboard::NewContent::Text(text))
+                        }
+                    } else if let Ok(img) = cb.get_image() {
+                        if img.bytes.is_empty() {
+                            None
+                        } else {
+                            Some(clipboard::NewContent::Image {
+                                width: img.width as u32,
+                                height: img.height as u32,
+                                rgba: img.bytes.into_owned(),
+                            })
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(content) = content {
+                        let state = watcher_app.state::<ClipboardState>();
+                        let changed = {
+                            let mut items = state.items.lock().unwrap();
+                            let mut last_seen = state.last_seen.lock().unwrap();
+                            let changed =
+                                clipboard::upsert(&mut items, content, &mut last_seen);
                             if changed {
-                                rebuild_clip_menu(&watcher_app, &watcher_submenu, state.inner());
-                                let _ = watcher_app.emit("clip-history-changed", ());
+                                let snapshot = items.clone();
+                                drop(items);
+                                let _ = clipboard::save_history(&snapshot);
                             }
+                            changed
+                        };
+                        if changed {
+                            rebuild_clip_menu(&watcher_app, &watcher_submenu, state.inner());
+                            let _ = watcher_app.emit("clip-history-changed", ());
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -199,6 +220,7 @@ pub fn run() {
             config::get_status_config,
             config::set_status_config,
             clipboard::get_clip_history,
+            clipboard::get_clip_image,
             clipboard::delete_clip_item,
             clipboard::clear_clip_history,
             clipboard::copy_clip_item,
@@ -235,7 +257,7 @@ fn rebuild_clip_menu(
             if let Ok(mi) = MenuItem::with_id(
                 app,
                 format!("clip-item-{}", item.id),
-                clipboard::preview(&item.content, 40),
+                clipboard::menu_label(item),
                 true,
                 None::<&str>,
             ) {

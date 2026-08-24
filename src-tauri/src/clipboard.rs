@@ -1,19 +1,57 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// 单条剪贴板历史记录
+/// 记录类型
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipKind {
+    #[default]
+    Text,
+    Image,
+}
+
+/// 单条剪贴板历史记录（持久化结构）
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ClipItem {
     pub id: String,
+    /// 文本内容；图片记录为空字符串
     pub content: String,
     pub created_at: String,
+    #[serde(default)]
+    pub kind: ClipKind,
+    /// 原图文件名（图片记录）
+    #[serde(default)]
+    pub image_file: Option<String>,
+    /// 缩略图文件名（图片记录）
+    #[serde(default)]
+    pub thumb_file: Option<String>,
+    /// 图片宽高（图片记录）
+    #[serde(default)]
+    pub image_size: Option<(u32, u32)>,
+    /// 图片字节指纹（用于去重）
+    #[serde(default)]
+    pub image_fp: Option<String>,
+}
+
+/// 返回给前端的视图结构（附带缩略图 data URL，不持久化）
+#[derive(Serialize, Clone)]
+pub struct ClipItemView {
+    pub id: String,
+    pub content: String,
+    pub created_at: String,
+    pub kind: ClipKind,
+    pub image_size: Option<(u32, u32)>,
+    pub thumbnail: Option<String>,
 }
 
 /// 剪贴板历史内存状态
 pub struct ClipboardState {
     pub items: Mutex<Vec<ClipItem>>,
-    /// 最近一次监听线程见过的剪贴板内容，用于区分新复制与残留内容
+    /// 最近一次监听线程见过的内容指纹，用于区分新复制与残留内容
     pub last_seen: Mutex<Option<String>>,
 }
 
@@ -21,6 +59,8 @@ pub struct ClipboardState {
 const MAX_ITEMS: usize = 200;
 /// 状态栏菜单展示条数
 pub const TRAY_SHOW_ITEMS: usize = 10;
+/// 缩略图最大边长
+const THUMB_MAX: u32 = 256;
 
 fn now_str() -> String {
     chrono::Local::now()
@@ -29,19 +69,14 @@ fn now_str() -> String {
         .to_string()
 }
 
-impl ClipItem {
-    fn new(content: String) -> Self {
-        Self {
-            id: scru128::new_string(),
-            content,
-            created_at: now_str(),
-        }
-    }
-}
-
 fn history_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join("Library/Application Support/MyMac/clipboard_history.json")
+}
+
+fn images_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join("Library/Application Support/MyMac/clipboard_images")
 }
 
 pub fn load_history() -> Vec<ClipItem> {
@@ -63,37 +98,199 @@ pub fn save_history(items: &[ClipItem]) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
+/// 内容指纹：文本直接存内容，图片存尺寸 + 字节哈希
+fn fingerprint_text(text: &str) -> String {
+    text.to_string()
+}
+
+fn fingerprint_image(width: usize, height: usize, bytes: &[u8]) -> String {
+    let mut h = DefaultHasher::new();
+    width.hash(&mut h);
+    height.hash(&mut h);
+    bytes.hash(&mut h);
+    format!("img:{}x{}:{}", width, height, h.finish())
+}
+
+/// 保存图片原图与缩略图，返回（原图文件名, 缩略图文件名, 宽高）
+fn save_image_files(
+    id: &str,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<(String, String, (u32, u32)), String> {
+    let dir = images_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let orig_name = format!("{id}.png");
+    let thumb_name = format!("{id}_thumb.png");
+    let orig_path = dir.join(&orig_name);
+    let thumb_path = dir.join(&thumb_name);
+
+    image::save_buffer(&orig_path, rgba, width, height, image::ColorType::Rgba8)
+        .map_err(|e| e.to_string())?;
+
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or("图片数据无效")?;
+    let (tw, th) = if width >= height {
+        (THUMB_MAX, ((height as u64 * THUMB_MAX as u64) / width as u64) as u32)
+    } else {
+        (((width as u64 * THUMB_MAX as u64) / height as u64) as u32, THUMB_MAX)
+    };
+    let thumb = image::imageops::resize(
+        &img,
+        tw.max(1),
+        th.max(1),
+        image::imageops::FilterType::Lanczos3,
+    );
+    thumb.save(&thumb_path).map_err(|e| e.to_string())?;
+
+    Ok((orig_name, thumb_name, (width, height)))
+}
+
+/// 删除记录对应的图片文件
+fn remove_image_files(item: &ClipItem) {
+    if item.kind != ClipKind::Image {
+        return;
+    }
+    let dir = images_dir();
+    if let Some(f) = &item.image_file {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    if let Some(f) = &item.thumb_file {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+}
+
+/// 读取缩略图并转为 data URL
+fn thumbnail_data_url(file: &str) -> Option<String> {
+    let bytes = std::fs::read(images_dir().join(file)).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:image/png;base64,{b64}"))
+}
+
+/// 新捕获的剪贴板内容
+pub enum NewContent {
+    Text(String),
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+}
+
 /// 将剪贴板新内容写入历史（去重、置顶、截断上限），返回是否发生变化
-/// `last_seen` 记录监听线程最近见过的内容，避免清空后残留内容重新入历史
-pub fn upsert(items: &mut Vec<ClipItem>, text: &str, last_seen: &mut Option<String>) -> bool {
-    let changed = last_seen.as_deref() != Some(text);
-    *last_seen = Some(text.to_string());
+pub fn upsert(
+    items: &mut Vec<ClipItem>,
+    content: NewContent,
+    last_seen: &mut Option<String>,
+) -> bool {
+    let fp = match &content {
+        NewContent::Text(t) => fingerprint_text(t),
+        NewContent::Image { width, height, rgba } => {
+            fingerprint_image(*width as usize, *height as usize, rgba)
+        }
+    };
+    let changed = last_seen.as_deref() != Some(fp.as_str());
+    *last_seen = Some(fp.clone());
     if !changed {
         return false;
     }
-    if let Some(pos) = items.iter().position(|i| i.content == text) {
-        let mut item = items.remove(pos);
-        item.created_at = now_str();
-        items.insert(0, item);
-    } else {
-        items.insert(0, ClipItem::new(text.to_string()));
+
+    match content {
+        NewContent::Text(text) => {
+            if let Some(pos) = items
+                .iter()
+                .position(|i| i.kind == ClipKind::Text && i.content == text)
+            {
+                let mut item = items.remove(pos);
+                item.created_at = now_str();
+                items.insert(0, item);
+            } else {
+                items.insert(
+                    0,
+                    ClipItem {
+                        id: scru128::new_string(),
+                        content: text,
+                        created_at: now_str(),
+                        kind: ClipKind::Text,
+                        image_file: None,
+                        thumb_file: None,
+                        image_size: None,
+                        image_fp: None,
+                    },
+                );
+            }
+        }
+        NewContent::Image { width, height, rgba } => {
+            // 全局去重：历史中已存在相同图片则置顶
+            if let Some(pos) = items.iter().position(|i| i.image_fp.as_deref() == Some(fp.as_str()))
+            {
+                let mut item = items.remove(pos);
+                item.created_at = now_str();
+                items.insert(0, item);
+            } else {
+                let id = scru128::new_string();
+                let saved = save_image_files(&id, width, height, &rgba);
+                let (orig, thumb, size) = match saved {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                items.insert(
+                    0,
+                    ClipItem {
+                        id,
+                        content: String::new(),
+                        created_at: now_str(),
+                        kind: ClipKind::Image,
+                        image_file: Some(orig),
+                        thumb_file: Some(thumb),
+                        image_size: Some(size),
+                        image_fp: Some(fp),
+                    },
+                );
+            }
+        }
     }
-    items.truncate(MAX_ITEMS);
+
+    // 截断上限，并清理被淘汰图片的文件
+    while items.len() > MAX_ITEMS {
+        if let Some(removed) = items.pop() {
+            remove_image_files(&removed);
+        }
+    }
     true
 }
 
 /// 复制指定记录到系统剪贴板，并将其置顶
 pub fn copy_to_clipboard_and_top(state: &ClipboardState, id: &str) -> Result<(), String> {
-    let content = {
+    let item = {
         let items = state.items.lock().unwrap();
-        items.iter().find(|i| i.id == id).map(|i| i.content.clone())
+        items.iter().find(|i| i.id == id).cloned()
     };
-    let content = content.ok_or("记录不存在")?;
+    let item = item.ok_or("记录不存在")?;
 
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(content.clone()).map_err(|e| e.to_string())?;
-
-    *state.last_seen.lock().unwrap() = Some(content.clone());
+    match item.kind {
+        ClipKind::Text => {
+            cb.set_text(item.content.clone()).map_err(|e| e.to_string())?;
+            *state.last_seen.lock().unwrap() = Some(fingerprint_text(&item.content));
+        }
+        ClipKind::Image => {
+            let file = item.image_file.as_ref().ok_or("图片文件缺失")?;
+            let dyn_img = image::open(images_dir().join(file)).map_err(|e| e.to_string())?;
+            let rgba = dyn_img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            let data = arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: rgba.into_raw().into(),
+            };
+            cb.set_image(data).map_err(|e| e.to_string())?;
+            if let Some(fp) = &item.image_fp {
+                *state.last_seen.lock().unwrap() = Some(fp.clone());
+            }
+        }
+    }
 
     let mut items = state.items.lock().unwrap();
     if let Some(pos) = items.iter().position(|i| i.id == id) {
@@ -104,15 +301,29 @@ pub fn copy_to_clipboard_and_top(state: &ClipboardState, id: &str) -> Result<(),
     save_history(&items)
 }
 
-/// 清空历史，并记录当前剪贴板内容，防止残留内容被监听线程重新写入
+/// 清空历史，并记录当前剪贴板指纹，防止残留内容被监听线程重新写入
 pub fn clear_history(state: &ClipboardState) -> Result<(), String> {
-    let current = arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut cb| cb.get_text().ok());
-    *state.last_seen.lock().unwrap() = current;
+    *state.last_seen.lock().unwrap() = current_clipboard_fingerprint();
     let mut items = state.items.lock().unwrap();
+    for item in items.iter() {
+        remove_image_files(item);
+    }
     items.clear();
     save_history(&items)
+}
+
+/// 读取当前剪贴板内容的指纹（文本优先，其次图片）
+pub fn current_clipboard_fingerprint() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    if let Ok(text) = cb.get_text() {
+        if !text.trim().is_empty() {
+            return Some(fingerprint_text(&text));
+        }
+    }
+    if let Ok(img) = cb.get_image() {
+        return Some(fingerprint_image(img.width, img.height, &img.bytes));
+    }
+    None
 }
 
 /// 生成状态栏菜单展示用的单行预览文本
@@ -130,15 +341,54 @@ pub fn preview(content: &str, max_chars: usize) -> String {
     }
 }
 
+/// 状态栏菜单展示用标签：文本为内容预览，图片为「图片 + 尺寸」
+pub fn menu_label(item: &ClipItem) -> String {
+    match item.kind {
+        ClipKind::Text => preview(&item.content, 40),
+        ClipKind::Image => match item.image_size {
+            Some((w, h)) => format!("[图片] {}×{}", w, h),
+            None => "[图片]".to_string(),
+        },
+    }
+}
+
 #[tauri::command]
-pub fn get_clip_history(state: tauri::State<ClipboardState>) -> Vec<ClipItem> {
-    state.items.lock().unwrap().clone()
+pub fn get_clip_history(state: tauri::State<ClipboardState>) -> Vec<ClipItemView> {
+    let items = state.items.lock().unwrap();
+    items
+        .iter()
+        .map(|i| ClipItemView {
+            id: i.id.clone(),
+            content: i.content.clone(),
+            created_at: i.created_at.clone(),
+            kind: i.kind,
+            image_size: i.image_size,
+            thumbnail: match &i.thumb_file {
+                Some(f) => thumbnail_data_url(f),
+                None => None,
+            },
+        })
+        .collect()
+}
+
+/// 获取图片记录的原图 data URL
+#[tauri::command]
+pub fn get_clip_image(state: tauri::State<ClipboardState>, id: String) -> Option<String> {
+    let items = state.items.lock().unwrap();
+    let item = items.iter().find(|i| i.id == id && i.kind == ClipKind::Image)?;
+    let file = item.image_file.as_ref()?;
+    let bytes = std::fs::read(images_dir().join(file)).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:image/png;base64,{b64}"))
 }
 
 #[tauri::command]
 pub fn delete_clip_item(state: tauri::State<ClipboardState>, id: String) -> Result<(), String> {
     let mut items = state.items.lock().unwrap();
-    items.retain(|i| i.id != id);
+    if let Some(pos) = items.iter().position(|i| i.id == id) {
+        let removed = items.remove(pos);
+        remove_image_files(&removed);
+    }
     save_history(&items)
 }
 
