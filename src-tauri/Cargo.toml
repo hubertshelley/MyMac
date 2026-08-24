@@ -27,4 +27,7 @@ trash = "5.2.6"
 plist = "1.10.0"
 fontdue = "0.9.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = "3"
+chrono = "0.4"
+scru128 = "3"
 

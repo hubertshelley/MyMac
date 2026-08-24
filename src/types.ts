@@ -70,3 +70,9 @@ export interface AppRelatedItem {
   size: number;
   is_app: boolean;
 }
+
+export interface ClipItem {
+  id: string;
+  content: string;
+  created_at: string;
+}

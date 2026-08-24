@@ -1,16 +1,18 @@
 use std::sync::{Arc, Mutex};
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 mod apps;
+mod clipboard;
 mod config;
 mod launch;
 mod status;
 mod system;
 
+use clipboard::ClipboardState;
 use system::{AppState, SystemMonitor};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +22,12 @@ pub fn run() {
         .setup(|app| {
             let monitor = Arc::new(Mutex::new(SystemMonitor::new()));
             let config = Arc::new(Mutex::new(config::load_config()));
+
+            // 剪贴板历史状态（启动时加载本地记录）
+            let clip_state = ClipboardState {
+                items: Mutex::new(clipboard::load_history()),
+                last_seen: Mutex::new(None),
+            };
 
             // 初始状态栏图标
             let init_icon = {
@@ -35,12 +43,18 @@ pub fn run() {
             let show_item = MenuItem::with_id(app, "show", "打开主面板", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 MyMac", true, None::<&str>)?;
 
+            // 粘贴板历史子菜单（动态刷新最近记录）
+            let clip_submenu = Submenu::with_id(app, "clip-history", "粘贴板历史", true)?;
+            rebuild_clip_menu(app.handle(), &clip_submenu, &clip_state);
+
             let menu = Menu::with_items(
                 app,
                 &[
                     &cpu_item,
                     &mem_item,
                     &net_item,
+                    &PredefinedMenuItem::separator(app)?,
+                    &clip_submenu,
                     &PredefinedMenuItem::separator(app)?,
                     &show_item,
                     &quit_item,
@@ -52,10 +66,26 @@ pub fn run() {
                 .tooltip("MyMac 电脑管家")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main_window(app),
-                    "quit" => app.exit(0),
-                    _ => {}
+                .on_menu_event({
+                    let clip_submenu = clip_submenu.clone();
+                    move |app, event| match event.id.as_ref() {
+                        "show" => show_main_window(app),
+                        "quit" => app.exit(0),
+                        "clear-clip" => {
+                            let state = app.state::<ClipboardState>();
+                            let _ = clipboard::clear_history(state.inner());
+                            rebuild_clip_menu(app, &clip_submenu, state.inner());
+                            let _ = app.emit("clip-history-changed", ());
+                        }
+                        id if id.starts_with("clip-item-") => {
+                            let clip_id = id.trim_start_matches("clip-item-");
+                            let state = app.state::<ClipboardState>();
+                            let _ = clipboard::copy_to_clipboard_and_top(state.inner(), clip_id);
+                            rebuild_clip_menu(app, &clip_submenu, state.inner());
+                            let _ = app.emit("clip-history-changed", ());
+                        }
+                        _ => {}
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -119,7 +149,41 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_secs(2));
             });
 
+            // 后台线程：监听剪贴板变化，写入历史并刷新状态栏子菜单
+            let watcher_app = app.handle().clone();
+            let watcher_submenu = clip_submenu.clone();
+            std::thread::spawn(move || {
+                let mut cb = match arboard::Clipboard::new() {
+                    Ok(cb) => cb,
+                    Err(_) => return,
+                };
+                loop {
+                    if let Ok(text) = cb.get_text() {
+                        if !text.trim().is_empty() {
+                            let state = watcher_app.state::<ClipboardState>();
+                            let changed = {
+                                let mut items = state.items.lock().unwrap();
+                                let mut last_seen = state.last_seen.lock().unwrap();
+                                let changed = clipboard::upsert(&mut items, &text, &mut last_seen);
+                                if changed {
+                                    let snapshot = items.clone();
+                                    drop(items);
+                                    let _ = clipboard::save_history(&snapshot);
+                                }
+                                changed
+                            };
+                            if changed {
+                                rebuild_clip_menu(&watcher_app, &watcher_submenu, state.inner());
+                                let _ = watcher_app.emit("clip-history-changed", ());
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            });
+
             app.manage(AppState { monitor, config });
+            app.manage(clip_state);
 
             Ok(())
         })
@@ -134,9 +198,63 @@ pub fn run() {
             launch::reveal_launch_item,
             config::get_status_config,
             config::set_status_config,
+            clipboard::get_clip_history,
+            clipboard::delete_clip_item,
+            clipboard::clear_clip_history,
+            clipboard::copy_clip_item,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 重建状态栏「粘贴板历史」子菜单内容
+fn rebuild_clip_menu(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    state: &ClipboardState,
+) {
+    let items = state.items.lock().unwrap();
+
+    // 移除子菜单中现有项，再整体重建
+    if let Ok(existing) = submenu.items() {
+        for item in existing {
+            let _ = submenu.remove(&item);
+        }
+    }
+
+    let mut owned: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+
+    if items.is_empty() {
+        if let Ok(mi) =
+            MenuItem::with_id(app, "clip-empty", "暂无记录", false, None::<&str>)
+        {
+            owned.push(Box::new(mi));
+        }
+    } else {
+        for item in items.iter().take(clipboard::TRAY_SHOW_ITEMS) {
+            if let Ok(mi) = MenuItem::with_id(
+                app,
+                format!("clip-item-{}", item.id),
+                clipboard::preview(&item.content, 40),
+                true,
+                None::<&str>,
+            ) {
+                owned.push(Box::new(mi));
+            }
+        }
+        if let Ok(sep) = PredefinedMenuItem::separator(app) {
+            owned.push(Box::new(sep));
+        }
+        if let Ok(clear) =
+            MenuItem::with_id(app, "clear-clip", "清空粘贴板历史", true, None::<&str>)
+        {
+            owned.push(Box::new(clear));
+        }
+    }
+
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        owned.iter().map(|b| b.as_ref()).collect();
+    let _ = submenu.append_items(&refs);
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
