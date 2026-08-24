@@ -382,6 +382,14 @@ pub fn menu_label(item: &ClipItem) -> String {
     }
 }
 
+/// 读取图片记录的缩略图，作为状态栏菜单项图标
+/// （muda 在 macOS 上会自动将图标缩放到 18pt 高度显示）
+pub fn load_thumb_image(thumb_file: &str) -> Option<tauri::image::Image<'static>> {
+    let path = images_dir().join(thumb_file);
+    let img = tauri::image::Image::from_path(path).ok()?;
+    Some(img.to_owned())
+}
+
 #[tauri::command]
 pub fn get_clip_history(state: tauri::State<ClipboardState>) -> Vec<ClipItemView> {
     let items = state.items.lock().unwrap();

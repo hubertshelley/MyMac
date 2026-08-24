@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tauri::{
-    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{IconMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager,
 };
@@ -264,12 +264,12 @@ fn rebuild_clip_menu(
     state: &ClipboardState,
 ) {
     // 1. 克隆菜单数据（短暂持锁，克隆后立即释放）
-    let menu_data: Vec<(String, String)> = {
+    let menu_data: Vec<(String, String, Option<String>)> = {
         let items = state.items.lock().unwrap();
         items
             .iter()
             .take(clipboard::TRAY_SHOW_ITEMS)
-            .map(|i| (i.id.clone(), clipboard::menu_label(i)))
+            .map(|i| (i.id.clone(), clipboard::menu_label(i), i.thumb_file.clone()))
             .collect()
     };
     let empty = menu_data.is_empty();
@@ -289,8 +289,21 @@ fn rebuild_clip_menu(
             owned.push(Box::new(mi));
         }
     } else {
-        for (id, label) in menu_data {
-            if let Ok(mi) = MenuItem::with_id(
+        for (id, label, thumb) in menu_data {
+            if let Some(thumb) = thumb {
+                // 图片记录：带缩略图图标
+                let icon = clipboard::load_thumb_image(&thumb);
+                if let Ok(mi) = IconMenuItem::with_id(
+                    app,
+                    format!("clip-item-{id}"),
+                    label,
+                    true,
+                    icon,
+                    None::<&str>,
+                ) {
+                    owned.push(Box::new(mi));
+                }
+            } else if let Ok(mi) = MenuItem::with_id(
                 app,
                 format!("clip-item-{id}"),
                 label,
