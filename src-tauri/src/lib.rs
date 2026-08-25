@@ -78,7 +78,6 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event({
                     let clip_submenu = clip_submenu.clone();
-                    let totp_submenu = totp_submenu.clone();
                     move |app, event| match event.id.as_ref() {
                         "show" => show_main_window(app),
                         "manage-totp" => {
@@ -89,16 +88,22 @@ pub fn run() {
                         id if id.starts_with("totp-item-") => {
                             let account_id = id.trim_start_matches("totp-item-").to_string();
                             let app = app.clone();
-                            let submenu = totp_submenu.clone();
                             std::thread::spawn(move || {
                                 let totp_state = app.state::<totp::TotpState>();
                                 let clip_state = app.state::<ClipboardState>();
-                                let _ = totp::copy_code(
+                                match totp::copy_code(
                                     totp_state.inner(),
                                     clip_state.inner(),
                                     &account_id,
-                                );
-                                rebuild_totp_menu(&app, &submenu, totp_state.inner());
+                                ) {
+                                    Ok(_) => {
+                                        let _ = app.emit("totp-code-copied", account_id);
+                                    }
+                                    Err(error) => {
+                                        eprintln!("状态栏复制 2FA 验证码失败：{error}");
+                                        let _ = app.emit("totp-copy-failed", error);
+                                    }
+                                }
                             });
                         }
                         // 剪贴板读写与菜单重建在后台线程执行，避免阻塞主线程
@@ -196,7 +201,7 @@ pub fn run() {
                 let icon = status::render_status_icon(&snapshot, &cfg);
                 let _ = tray_clone.set_icon(Some(icon));
                 let totp_state = status_app.state::<totp::TotpState>();
-                rebuild_totp_menu(&status_app, &status_totp_submenu, totp_state.inner());
+                update_totp_menu(&status_app, &status_totp_submenu, totp_state.inner());
 
                 std::thread::sleep(std::time::Duration::from_secs(2));
             });
@@ -361,6 +366,42 @@ fn rebuild_clip_menu(
 
     let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = owned.iter().map(|b| b.as_ref()).collect();
     let _ = submenu.append_items(&refs);
+}
+
+fn update_totp_menu(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    state: &totp::TotpState,
+) {
+    let entries = totp::menu_entries(state);
+    let expected_ids: Vec<String> = entries
+        .iter()
+        .map(|(id, _)| format!("totp-item-{id}"))
+        .collect();
+    let existing = submenu.items().unwrap_or_default();
+    let existing_ids: Vec<String> = existing
+        .iter()
+        .filter(|item| item.id().as_ref().starts_with("totp-item-"))
+        .map(|item| item.id().as_ref().to_string())
+        .collect();
+
+    if existing_ids != expected_ids {
+        rebuild_totp_menu(app, submenu, state);
+        return;
+    }
+
+    for (id, label) in entries {
+        let menu_id = format!("totp-item-{id}");
+        if let Some(item) = existing
+            .iter()
+            .find(|item| item.id().as_ref() == menu_id)
+            .and_then(|item| item.as_menuitem())
+        {
+            if let Err(error) = item.set_text(label) {
+                eprintln!("更新状态栏 2FA 验证码失败：{error}");
+            }
+        }
+    }
 }
 
 fn rebuild_totp_menu(
