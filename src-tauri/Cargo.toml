@@ -31,4 +31,8 @@ arboard = "3"
 chrono = "0.4"
 scru128 = "3"
 base64 = "0.22"
+hmac = "0.12"
+sha1 = "0.10"
+data-encoding = "2.6"
+url = "2.5"
 

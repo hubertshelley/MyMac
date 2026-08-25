@@ -11,6 +11,7 @@ mod config;
 mod launch;
 mod status;
 mod system;
+mod totp;
 
 use clipboard::ClipboardState;
 use system::{AppState, SystemMonitor};
@@ -28,6 +29,9 @@ pub fn run() {
             let clip_state = ClipboardState {
                 items: Mutex::new(clipboard::load_history()),
                 last_seen: Mutex::new(clipboard::current_clipboard_fingerprint()),
+            };
+            let totp_state = totp::TotpState {
+                accounts: Mutex::new(totp::load_accounts()),
             };
 
             // 初始状态栏图标
@@ -48,6 +52,10 @@ pub fn run() {
             let clip_submenu = Submenu::with_id(app, "clip-history", "粘贴板历史", true)?;
             rebuild_clip_menu(app.handle(), &clip_submenu, &clip_state);
 
+            // 2FA 验证码子菜单（验证码随刷新线程更新）
+            let totp_submenu = Submenu::with_id(app, "totp-codes", "2FA 验证码", true)?;
+            rebuild_totp_menu(app.handle(), &totp_submenu, &totp_state);
+
             let menu = Menu::with_items(
                 app,
                 &[
@@ -56,6 +64,7 @@ pub fn run() {
                     &net_item,
                     &PredefinedMenuItem::separator(app)?,
                     &clip_submenu,
+                    &totp_submenu,
                     &PredefinedMenuItem::separator(app)?,
                     &show_item,
                     &quit_item,
@@ -69,9 +78,29 @@ pub fn run() {
                 .show_menu_on_left_click(true)
                 .on_menu_event({
                     let clip_submenu = clip_submenu.clone();
+                    let totp_submenu = totp_submenu.clone();
                     move |app, event| match event.id.as_ref() {
                         "show" => show_main_window(app),
+                        "manage-totp" => {
+                            show_main_window(app);
+                            let _ = app.emit("navigate-to", "totp");
+                        }
                         "quit" => app.exit(0),
+                        id if id.starts_with("totp-item-") => {
+                            let account_id = id.trim_start_matches("totp-item-").to_string();
+                            let app = app.clone();
+                            let submenu = totp_submenu.clone();
+                            std::thread::spawn(move || {
+                                let totp_state = app.state::<totp::TotpState>();
+                                let clip_state = app.state::<ClipboardState>();
+                                let _ = totp::copy_code(
+                                    totp_state.inner(),
+                                    clip_state.inner(),
+                                    &account_id,
+                                );
+                                rebuild_totp_menu(&app, &submenu, totp_state.inner());
+                            });
+                        }
                         // 剪贴板读写与菜单重建在后台线程执行，避免阻塞主线程
                         "clear-clip" => {
                             let app = app.clone();
@@ -89,7 +118,8 @@ pub fn run() {
                             let submenu = clip_submenu.clone();
                             std::thread::spawn(move || {
                                 let state = app.state::<ClipboardState>();
-                                let _ = clipboard::copy_to_clipboard_and_top(state.inner(), &clip_id);
+                                let _ =
+                                    clipboard::copy_to_clipboard_and_top(state.inner(), &clip_id);
                                 rebuild_clip_menu(&app, &submenu, state.inner());
                                 let _ = app.emit("clip-history-changed", ());
                             });
@@ -108,6 +138,14 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // 注册共享状态后再启动会读取状态的后台线程
+            app.manage(AppState {
+                monitor: monitor.clone(),
+                config: config.clone(),
+            });
+            app.manage(clip_state);
+            app.manage(totp_state);
 
             // 关闭主窗口时隐藏窗口与 Dock 图标，状态栏继续常驻
             if let Some(window) = app.get_webview_window("main") {
@@ -130,6 +168,8 @@ pub fn run() {
             let cpu_item = cpu_item.clone();
             let mem_item = mem_item.clone();
             let net_item = net_item.clone();
+            let status_app = app.handle().clone();
+            let status_totp_submenu = totp_submenu.clone();
             std::thread::spawn(move || loop {
                 let snapshot = {
                     let mut m = monitor_clone.lock().unwrap();
@@ -155,6 +195,8 @@ pub fn run() {
 
                 let icon = status::render_status_icon(&snapshot, &cfg);
                 let _ = tray_clone.set_icon(Some(icon));
+                let totp_state = status_app.state::<totp::TotpState>();
+                rebuild_totp_menu(&status_app, &status_totp_submenu, totp_state.inner());
 
                 std::thread::sleep(std::time::Duration::from_secs(2));
             });
@@ -180,11 +222,8 @@ pub fn run() {
                             None
                         } else {
                             // 快速检查：内容与上次一致则跳过，避免重复保存图片文件
-                            let fp = clipboard::image_fingerprint(
-                                img.width,
-                                img.height,
-                                &img.bytes,
-                            );
+                            let fp =
+                                clipboard::image_fingerprint(img.width, img.height, &img.bytes);
                             let already_seen = {
                                 let state = watcher_app.state::<ClipboardState>();
                                 let last_seen = state.last_seen.lock().unwrap();
@@ -211,8 +250,7 @@ pub fn run() {
                         let changed = {
                             let mut items = state.items.lock().unwrap();
                             let mut last_seen = state.last_seen.lock().unwrap();
-                            let changed =
-                                clipboard::upsert(&mut items, content, &mut last_seen);
+                            let changed = clipboard::upsert(&mut items, content, &mut last_seen);
                             if changed {
                                 let snapshot = items.clone();
                                 drop(items);
@@ -228,9 +266,6 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
             });
-
-            app.manage(AppState { monitor, config });
-            app.manage(clip_state);
 
             Ok(())
         })
@@ -250,6 +285,10 @@ pub fn run() {
             clipboard::delete_clip_item,
             clipboard::clear_clip_history,
             clipboard::copy_clip_item,
+            totp::get_totp_accounts,
+            totp::add_totp_account,
+            totp::delete_totp_account,
+            totp::copy_totp_code,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -283,9 +322,7 @@ fn rebuild_clip_menu(
 
     let mut owned: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
     if empty {
-        if let Ok(mi) =
-            MenuItem::with_id(app, "clip-empty", "暂无记录", false, None::<&str>)
-        {
+        if let Ok(mi) = MenuItem::with_id(app, "clip-empty", "暂无记录", false, None::<&str>) {
             owned.push(Box::new(mi));
         }
     } else {
@@ -303,13 +340,9 @@ fn rebuild_clip_menu(
                 ) {
                     owned.push(Box::new(mi));
                 }
-            } else if let Ok(mi) = MenuItem::with_id(
-                app,
-                format!("clip-item-{id}"),
-                label,
-                true,
-                None::<&str>,
-            ) {
+            } else if let Ok(mi) =
+                MenuItem::with_id(app, format!("clip-item-{id}"), label, true, None::<&str>)
+            {
                 owned.push(Box::new(mi));
             }
         }
@@ -323,8 +356,45 @@ fn rebuild_clip_menu(
         }
     }
 
-    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> =
-        owned.iter().map(|b| b.as_ref()).collect();
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = owned.iter().map(|b| b.as_ref()).collect();
+    let _ = submenu.append_items(&refs);
+}
+
+fn rebuild_totp_menu(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+    state: &totp::TotpState,
+) {
+    let entries = totp::menu_entries(state);
+    if let Ok(existing) = submenu.items() {
+        for item in existing {
+            let _ = submenu.remove(&item);
+        }
+    }
+
+    let mut owned: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    if entries.is_empty() {
+        if let Ok(item) = MenuItem::with_id(app, "totp-empty", "暂无账户", false, None::<&str>)
+        {
+            owned.push(Box::new(item));
+        }
+    } else {
+        for (id, label) in entries {
+            if let Ok(item) =
+                MenuItem::with_id(app, format!("totp-item-{id}"), label, true, None::<&str>)
+            {
+                owned.push(Box::new(item));
+            }
+        }
+    }
+    if let Ok(separator) = PredefinedMenuItem::separator(app) {
+        owned.push(Box::new(separator));
+    }
+    if let Ok(item) = MenuItem::with_id(app, "manage-totp", "管理 2FA 验证码…", true, None::<&str>)
+    {
+        owned.push(Box::new(item));
+    }
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = owned.iter().map(|item| item.as_ref()).collect();
     let _ = submenu.append_items(&refs);
 }
 

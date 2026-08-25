@@ -81,3 +81,13 @@ export interface ClipItem {
   image_size: [number, number] | null;
   thumbnail: string | null;
 }
+
+export interface TotpAccount {
+  id: string;
+  name: string;
+  issuer: string;
+  digits: number;
+  period: number;
+  code: string;
+  remaining: number;
+}
