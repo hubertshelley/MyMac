@@ -38,6 +38,9 @@ data-encoding = "2.6"
 url = "2.5"
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
+
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }
 

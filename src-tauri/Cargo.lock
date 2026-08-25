@@ -2341,6 +2341,7 @@ dependencies = [
  "hmac",
  "image",
  "keyring",
+ "objc2-app-kit",
  "plist",
  "qrcode",
  "rqrr",
