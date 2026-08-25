@@ -26,7 +26,8 @@ sysinfo = "0.39.6"
 trash = "5.2.6"
 plist = "1.10.0"
 fontdue = "0.9.4"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rqrr = "0.10"
 arboard = "3"
 chrono = "0.4"
 scru128 = "3"
@@ -35,4 +36,8 @@ hmac = "0.12"
 sha1 = "0.10"
 data-encoding = "2.6"
 url = "2.5"
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
+
+[dev-dependencies]
+qrcode = { version = "0.14", default-features = false }
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Copy, KeyRound, Plus, Timer, Trash2 } from "@lucide/vue";
+import { ClipboardPaste, Copy, ImagePlus, KeyRound, Plus, Timer, Trash2 } from "@lucide/vue";
 import type { TotpAccount } from "@/types";
 import Card from "@/components/ui/Card.vue";
 import Button from "@/components/ui/Button.vue";
@@ -13,6 +13,9 @@ const secret = ref("");
 const digits = ref(6);
 const period = ref(30);
 const adding = ref(false);
+const decodingQr = ref(false);
+const deletingId = ref<string | null>(null);
+const pendingDeleteId = ref<string | null>(null);
 const error = ref("");
 const toast = ref("");
 let refreshTimer: number | undefined;
@@ -70,6 +73,27 @@ async function refresh() {
   accounts.value = await invoke<TotpAccount[]>("get_totp_accounts");
 }
 
+async function applyQrResult(action: () => Promise<string>) {
+  error.value = "";
+  decodingQr.value = true;
+  try {
+    secret.value = await action();
+    showToast("二维码识别成功，已自动填入");
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    decodingQr.value = false;
+  }
+}
+
+async function captureQr() {
+  await applyQrResult(() => invoke<string>("capture_totp_qr"));
+}
+
+async function decodeQrClipboard() {
+  await applyQrResult(() => invoke<string>("decode_totp_qr_clipboard"));
+}
+
 async function addAccount() {
   error.value = "";
   adding.value = true;
@@ -105,14 +129,24 @@ async function copyCode(account: TotpAccount) {
   }
 }
 
+function requestRemove(account: TotpAccount) {
+  error.value = "";
+  pendingDeleteId.value = account.id;
+}
+
 async function removeAccount(account: TotpAccount) {
-  if (!window.confirm(`确定删除“${account.name}”吗？`)) return;
+  error.value = "";
+  deletingId.value = account.id;
   try {
     await invoke("delete_totp_account", { id: account.id });
+    accounts.value = accounts.value.filter((item) => item.id !== account.id);
+    pendingDeleteId.value = null;
     await refresh();
     showToast("账户已删除");
   } catch (e) {
-    error.value = String(e);
+    error.value = `删除失败：${String(e)}`;
+  } finally {
+    deletingId.value = null;
   }
 }
 
@@ -144,6 +178,15 @@ onUnmounted(() => {
           <span>Base32 密钥或 otpauth:// 链接</span>
           <input v-model="secret" required autocomplete="off" spellcheck="false" placeholder="JBSWY3DPEHPK3PXP 或 otpauth://totp/…" class="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-sm text-foreground outline-none focus:ring-2 focus:ring-ring" />
         </label>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" :disabled="decodingQr" @click="captureQr">
+            <ImagePlus class="size-4" />截图识别
+          </Button>
+          <Button type="button" variant="outline" size="sm" :disabled="decodingQr" @click="decodeQrClipboard">
+            <ClipboardPaste class="size-4" />读取剪贴板截图
+          </Button>
+          <span v-if="decodingQr" class="text-xs text-muted-foreground">正在识别二维码…</span>
+        </div>
         <div class="grid grid-cols-2 gap-3">
           <label class="space-y-1 text-xs text-muted-foreground">
             <span>账户名称{{ isOtpauth ? "（已从链接获取）" : "" }}</span>
@@ -187,15 +230,18 @@ onUnmounted(() => {
 
     <div v-else class="grid grid-cols-2 gap-4">
       <Card v-for="account in accounts" :key="account.id" class="group relative overflow-hidden p-4">
-        <button class="w-full text-left" title="复制验证码" @click="copyCode(account)">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <p class="truncate text-sm font-semibold">{{ account.name }}</p>
-              <p class="truncate text-xs text-muted-foreground">{{ account.issuer || "TOTP" }}</p>
-            </div>
-            <Button variant="ghost" size="icon" class="size-8 opacity-0 group-hover:opacity-100" title="复制" @click.stop="copyCode(account)">
-              <Copy class="size-4" />
-            </Button>
+        <div
+          class="cursor-pointer pr-9 text-left"
+          role="button"
+          tabindex="0"
+          title="复制验证码"
+          @click="copyCode(account)"
+          @keydown.enter="copyCode(account)"
+          @keydown.space.prevent="copyCode(account)"
+        >
+          <div class="min-w-0">
+            <p class="truncate text-sm font-semibold">{{ account.name }}</p>
+            <p class="truncate text-xs text-muted-foreground">{{ account.issuer || "TOTP" }}</p>
           </div>
           <p class="mt-4 font-mono text-3xl font-semibold tracking-[0.18em]">{{ displayCode(account.code) }}</p>
           <div class="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
@@ -205,10 +251,24 @@ onUnmounted(() => {
             </div>
             <span class="w-8 text-right">{{ account.remaining }} 秒</span>
           </div>
-        </button>
-        <Button variant="ghost" size="icon" class="absolute bottom-2 right-2 size-8 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100" title="删除账户" @click="removeAccount(account)">
-          <Trash2 class="size-4" />
-        </Button>
+        </div>
+        <div v-if="pendingDeleteId !== account.id" class="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md bg-background/90 opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          <Button type="button" variant="ghost" size="icon" class="size-8" title="复制" @click.stop="copyCode(account)">
+            <Copy class="size-4" />
+          </Button>
+          <Button type="button" variant="ghost" size="icon" class="size-8 text-muted-foreground hover:text-destructive" title="删除账户" @click.stop="requestRemove(account)">
+            <Trash2 class="size-4" />
+          </Button>
+        </div>
+        <div v-else class="absolute inset-x-0 bottom-0 z-20 flex items-center justify-between gap-3 border-t border-destructive/20 bg-background px-4 py-2 shadow-lg" @click.stop>
+          <span class="min-w-0 truncate text-xs text-destructive">确定删除“{{ account.name }}”？</span>
+          <div class="flex shrink-0 gap-2">
+            <Button type="button" variant="ghost" size="sm" :disabled="deletingId === account.id" @click.stop="pendingDeleteId = null">取消</Button>
+            <Button type="button" variant="destructive" size="sm" :disabled="deletingId === account.id" @click.stop="removeAccount(account)">
+              {{ deletingId === account.id ? "删除中…" : "确认删除" }}
+            </Button>
+          </div>
+        </div>
       </Card>
     </div>
 

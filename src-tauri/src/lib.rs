@@ -289,6 +289,9 @@ pub fn run() {
             totp::add_totp_account,
             totp::delete_totp_account,
             totp::copy_totp_code,
+            totp::decode_totp_qr_image,
+            totp::capture_totp_qr,
+            totp::decode_totp_qr_clipboard,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

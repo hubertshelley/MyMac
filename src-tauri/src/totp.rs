@@ -1,3 +1,4 @@
+use base64::Engine;
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ pub struct TotpAccount {
     pub id: String,
     pub name: String,
     pub issuer: String,
+    #[serde(default, skip_serializing)]
     pub secret: String,
     pub digits: u32,
     pub period: u64,
@@ -31,32 +33,115 @@ pub struct TotpState {
     pub accounts: Mutex<Vec<TotpAccount>>,
 }
 
+const KEYRING_SERVICE: &str = "com.mymac.manager.totp";
+
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
 fn accounts_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join("Library/Application Support/MyMac/totp_accounts.json")
+    home_dir().join(".mymac/totp_accounts.json")
+}
+
+fn legacy_accounts_path() -> PathBuf {
+    home_dir().join("Library/Application Support/MyMac/totp_accounts.json")
+}
+
+fn keyring_entry(id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, id).map_err(|e| format!("无法访问 macOS 钥匙串：{e}"))
+}
+
+fn set_secret(id: &str, secret: &str) -> Result<(), String> {
+    keyring_entry(id)?
+        .set_password(secret)
+        .map_err(|e| format!("无法保存密钥到 macOS 钥匙串：{e}"))
+}
+
+fn get_secret(id: &str) -> Result<String, String> {
+    keyring_entry(id)?
+        .get_password()
+        .map_err(|e| format!("无法从 macOS 钥匙串读取密钥：{e}"))
+}
+
+fn delete_secret(id: &str) -> Result<(), String> {
+    match keyring_entry(id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("无法从 macOS 钥匙串删除密钥：{e}")),
+    }
 }
 
 pub fn load_accounts() -> Vec<TotpAccount> {
-    std::fs::read_to_string(accounts_path())
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    match load_accounts_inner() {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            eprintln!("2FA 账户加载失败：{e}");
+            Vec::new()
+        }
+    }
+}
+
+fn load_accounts_inner() -> Result<Vec<TotpAccount>, String> {
+    let path = accounts_path();
+    if !path.exists() && legacy_accounts_path().exists() {
+        migrate_legacy_accounts()?;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut accounts: Vec<TotpAccount> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    for account in &mut accounts {
+        account.secret = get_secret(&account.id)?;
+    }
+    Ok(accounts)
+}
+
+fn migrate_legacy_accounts() -> Result<(), String> {
+    let legacy_path = legacy_accounts_path();
+    let content = std::fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
+    let accounts: Vec<TotpAccount> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let mut stored_ids: Vec<String> = Vec::new();
+    for account in &accounts {
+        if let Err(e) = set_secret(&account.id, &account.secret) {
+            for id in stored_ids {
+                let _ = delete_secret(&id);
+            }
+            return Err(e);
+        }
+        stored_ids.push(account.id.clone());
+    }
+    if let Err(e) = save_accounts(&accounts) {
+        for id in stored_ids {
+            let _ = delete_secret(&id);
+        }
+        return Err(e);
+    }
+    std::fs::remove_file(&legacy_path).map_err(|e| format!("迁移完成但无法删除旧密钥文件：{e}"))?;
+    Ok(())
 }
 
 fn save_accounts(accounts: &[TotpAccount]) -> Result<(), String> {
     let path = accounts_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| e.to_string())?;
+        }
     }
     let content = serde_json::to_string_pretty(accounts).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, content).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    std::fs::rename(temp, path).map_err(|e| e.to_string())
 }
 
 fn timestamp() -> u64 {
@@ -162,6 +247,88 @@ fn validate_options(digits: u32, period: u64) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_qr_payload(payload: &str) -> Result<String, String> {
+    let payload = payload.trim();
+    if payload.to_lowercase().starts_with("otpauth://") {
+        parse_otpauth(payload)?;
+        return Ok(payload.to_string());
+    }
+    normalize_secret(payload).map_err(|_| "二维码中没有有效的 2FA 密钥或 otpauth 链接".to_string())
+}
+
+fn decode_qr_image(bytes: &[u8]) -> Result<String, String> {
+    let image = image::load_from_memory(bytes)
+        .map_err(|_| "无法读取图片，请选择 PNG 或 JPEG 截图".to_string())?
+        .to_luma8();
+    let mut prepared = rqrr::PreparedImage::prepare(image);
+    for grid in prepared.detect_grids() {
+        if let Ok((_meta, payload)) = grid.decode() {
+            if let Ok(valid) = validate_qr_payload(&payload) {
+                return Ok(valid);
+            }
+        }
+    }
+    Err("未识别到有效的 2FA 二维码，请确保二维码清晰且完整".to_string())
+}
+
+#[tauri::command]
+pub fn decode_totp_qr_image(data: String) -> Result<String, String> {
+    let encoded = data
+        .split_once(',')
+        .map(|(_, value)| value)
+        .unwrap_or(&data);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| "图片数据无效".to_string())?;
+    decode_qr_image(&bytes)
+}
+
+#[tauri::command]
+pub fn capture_totp_qr() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = std::env::temp_dir().join(format!("mymac-totp-{}.png", scru128::new_string()));
+        let status = std::process::Command::new("/usr/sbin/screencapture")
+            .arg("-i")
+            .arg("-x")
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("无法启动系统截图：{e}"))?;
+        if !status.success() || !path.exists() {
+            return Err("已取消截图".to_string());
+        }
+        let result = std::fs::read(&path)
+            .map_err(|e| format!("无法读取截图：{e}"))
+            .and_then(|bytes| decode_qr_image(&bytes));
+        let _ = std::fs::remove_file(path);
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前仅支持在 macOS 上直接截图识别".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn decode_totp_qr_clipboard() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let image = clipboard
+        .get_image()
+        .map_err(|_| "剪贴板中没有图片，请先复制二维码截图".to_string())?;
+    let rgba = image::RgbaImage::from_raw(
+        image.width as u32,
+        image.height as u32,
+        image.bytes.into_owned(),
+    )
+    .ok_or("剪贴板图片数据无效")?;
+    let dynamic = image::DynamicImage::ImageRgba8(rgba);
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    dynamic
+        .write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    decode_qr_image(cursor.get_ref())
+}
+
 #[tauri::command]
 pub fn get_totp_accounts(state: tauri::State<TotpState>) -> Result<Vec<TotpAccountView>, String> {
     let now = timestamp();
@@ -208,21 +375,30 @@ pub fn add_totp_account(
         period,
     };
     let result = view(&account, timestamp())?;
+    set_secret(&account.id, &account.secret)?;
     let mut accounts = state.accounts.lock().unwrap();
-    accounts.push(account);
-    save_accounts(&accounts)?;
+    accounts.push(account.clone());
+    if let Err(e) = save_accounts(&accounts) {
+        accounts.pop();
+        let _ = delete_secret(&account.id);
+        return Err(e);
+    }
     Ok(result)
 }
 
 #[tauri::command]
 pub fn delete_totp_account(state: tauri::State<TotpState>, id: String) -> Result<(), String> {
     let mut accounts = state.accounts.lock().unwrap();
-    let old_len = accounts.len();
-    accounts.retain(|a| a.id != id);
-    if accounts.len() == old_len {
-        return Err("账户不存在".to_string());
+    let position = accounts
+        .iter()
+        .position(|account| account.id == id)
+        .ok_or("账户不存在")?;
+    let removed = accounts.remove(position);
+    if let Err(e) = save_accounts(&accounts) {
+        accounts.insert(position, removed);
+        return Err(e);
     }
-    save_accounts(&accounts)
+    delete_secret(&id)
 }
 
 pub fn copy_code(
@@ -304,5 +480,37 @@ mod tests {
         assert_eq!(parsed.2, "JBSWY3DPEHPK3PXP");
         assert_eq!(parsed.3, 6);
         assert_eq!(parsed.4, 30);
+    }
+
+    #[test]
+    fn decodes_otpauth_qr_image() {
+        let payload =
+            "otpauth://totp/GitHub:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
+        let code = qrcode::QrCode::new(payload.as_bytes()).unwrap();
+        let width = code.width() as u32;
+        let scale = 8;
+        let quiet = 4;
+        let size = (width + quiet * 2) * scale;
+        let mut qr_image = image::GrayImage::from_pixel(size, size, image::Luma([255]));
+        for y in 0..width {
+            for x in 0..width {
+                if code[(x as usize, y as usize)] == qrcode::Color::Dark {
+                    for py in 0..scale {
+                        for px in 0..scale {
+                            qr_image.put_pixel(
+                                (x + quiet) * scale + px,
+                                (y + quiet) * scale + py,
+                                image::Luma([0]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(qr_image)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(decode_qr_image(png.get_ref()).unwrap(), payload);
     }
 }
