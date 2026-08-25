@@ -91,3 +91,28 @@ export interface TotpAccount {
   code: string;
   remaining: number;
 }
+
+
+export type BrewSource = "official" | "tsinghua" | "ustc";
+
+export interface BrewStatus {
+  installed: boolean;
+  path: string;
+  version: string;
+  source: BrewSource;
+}
+
+export interface BrewPackage {
+  name: string;
+  version: string;
+  kind: "formula" | "cask";
+  installed: boolean;
+  outdated: boolean;
+  trusted: boolean;
+  tap: string | null;
+}
+
+export interface BrewOperationResult {
+  message: string;
+  output: string;
+}
