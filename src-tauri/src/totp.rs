@@ -3,6 +3,7 @@ use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +35,7 @@ pub struct TotpState {
 }
 
 const KEYRING_SERVICE: &str = "com.mymac.manager.totp";
+const KEYRING_VAULT_ACCOUNT: &str = "totp-secret-vault";
 
 fn home_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -47,27 +49,53 @@ fn legacy_accounts_path() -> PathBuf {
     home_dir().join("Library/Application Support/MyMac/totp_accounts.json")
 }
 
-fn keyring_entry(id: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, id).map_err(|e| format!("无法访问 macOS 钥匙串：{e}"))
+fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| format!("无法访问 macOS 钥匙串：{e}"))
 }
 
-fn set_secret(id: &str, secret: &str) -> Result<(), String> {
-    keyring_entry(id)?
-        .set_password(secret)
-        .map_err(|e| format!("无法保存密钥到 macOS 钥匙串：{e}"))
+fn load_secret_vault() -> Result<Option<HashMap<String, String>>, String> {
+    match keyring_entry(KEYRING_VAULT_ACCOUNT)?.get_password() {
+        Ok(content) => serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| format!("2FA 密钥库格式无效：{e}")),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("无法从 macOS 钥匙串读取 2FA 密钥库：{e}")),
+    }
 }
 
-fn get_secret(id: &str) -> Result<String, String> {
-    keyring_entry(id)?
-        .get_password()
-        .map_err(|e| format!("无法从 macOS 钥匙串读取密钥：{e}"))
+fn save_secret_vault(vault: &HashMap<String, String>) -> Result<(), String> {
+    let content = serde_json::to_string(vault).map_err(|e| e.to_string())?;
+    keyring_entry(KEYRING_VAULT_ACCOUNT)?
+        .set_password(&content)
+        .map_err(|e| format!("无法保存 2FA 密钥库到 macOS 钥匙串：{e}"))
 }
 
-fn delete_secret(id: &str) -> Result<(), String> {
+fn delete_legacy_secret(id: &str) -> Result<(), String> {
     match keyring_entry(id)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("无法从 macOS 钥匙串删除密钥：{e}")),
+        Err(e) => Err(format!("无法删除旧钥匙串项目：{e}")),
     }
+}
+
+fn read_legacy_secret(id: &str) -> Result<String, String> {
+    keyring_entry(id)?
+        .get_password()
+        .map_err(|e| format!("无法读取旧钥匙串项目：{e}"))
+}
+
+fn migrate_per_account_keyring(accounts: &[TotpAccount]) -> Result<HashMap<String, String>, String> {
+    let mut vault = HashMap::new();
+    for account in accounts {
+        vault.insert(account.id.clone(), read_legacy_secret(&account.id)?);
+    }
+    save_secret_vault(&vault)?;
+    for account in accounts {
+        if let Err(e) = delete_legacy_secret(&account.id) {
+            eprintln!("{e}");
+        }
+    }
+    Ok(vault)
 }
 
 pub fn load_accounts() -> Vec<TotpAccount> {
@@ -91,8 +119,16 @@ fn load_accounts_inner() -> Result<Vec<TotpAccount>, String> {
         Err(e) => return Err(e.to_string()),
     };
     let mut accounts: Vec<TotpAccount> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let vault = match load_secret_vault()? {
+        Some(vault) => vault,
+        None if accounts.is_empty() => HashMap::new(),
+        None => migrate_per_account_keyring(&accounts)?,
+    };
     for account in &mut accounts {
-        account.secret = get_secret(&account.id)?;
+        account.secret = vault
+            .get(&account.id)
+            .cloned()
+            .ok_or_else(|| format!("账户“{}”的密钥不存在", account.name))?;
     }
     Ok(accounts)
 }
@@ -101,20 +137,17 @@ fn migrate_legacy_accounts() -> Result<(), String> {
     let legacy_path = legacy_accounts_path();
     let content = std::fs::read_to_string(&legacy_path).map_err(|e| e.to_string())?;
     let accounts: Vec<TotpAccount> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let mut stored_ids: Vec<String> = Vec::new();
-    for account in &accounts {
-        if let Err(e) = set_secret(&account.id, &account.secret) {
-            for id in stored_ids {
-                let _ = delete_secret(&id);
-            }
-            return Err(e);
-        }
-        stored_ids.push(account.id.clone());
-    }
+    let vault: HashMap<String, String> = accounts
+        .iter()
+        .map(|account| (account.id.clone(), account.secret.clone()))
+        .collect();
+    save_secret_vault(&vault)?;
     if let Err(e) = save_accounts(&accounts) {
-        for id in stored_ids {
-            let _ = delete_secret(&id);
-        }
+        let _ = keyring_entry(KEYRING_VAULT_ACCOUNT).and_then(|entry| {
+            entry
+                .delete_credential()
+                .map_err(|error| error.to_string())
+        });
         return Err(e);
     }
     std::fs::remove_file(&legacy_path).map_err(|e| format!("迁移完成但无法删除旧密钥文件：{e}"))?;
@@ -375,12 +408,18 @@ pub fn add_totp_account(
         period,
     };
     let result = view(&account, timestamp())?;
-    set_secret(&account.id, &account.secret)?;
     let mut accounts = state.accounts.lock().unwrap();
+    let mut vault: HashMap<String, String> = accounts
+        .iter()
+        .map(|item| (item.id.clone(), item.secret.clone()))
+        .collect();
+    vault.insert(account.id.clone(), account.secret.clone());
+    save_secret_vault(&vault)?;
     accounts.push(account.clone());
     if let Err(e) = save_accounts(&accounts) {
         accounts.pop();
-        let _ = delete_secret(&account.id);
+        vault.remove(&account.id);
+        let _ = save_secret_vault(&vault);
         return Err(e);
     }
     Ok(result)
@@ -398,7 +437,16 @@ pub fn delete_totp_account(state: tauri::State<TotpState>, id: String) -> Result
         accounts.insert(position, removed);
         return Err(e);
     }
-    delete_secret(&id)
+    let vault: HashMap<String, String> = accounts
+        .iter()
+        .map(|account| (account.id.clone(), account.secret.clone()))
+        .collect();
+    if let Err(e) = save_secret_vault(&vault) {
+        accounts.insert(position, removed);
+        let _ = save_accounts(&accounts);
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub fn copy_code(

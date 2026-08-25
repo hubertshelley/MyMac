@@ -28,7 +28,8 @@ pub fn run() {
             // 避免重启后残留内容被当作新记录重新写入）
             let clip_state = ClipboardState {
                 items: Mutex::new(clipboard::load_history()),
-                last_seen: Mutex::new(clipboard::current_clipboard_fingerprint()),
+                // 启动时不读取剪贴板内容，避免应用启动触发通用剪贴板按需取回。
+                last_seen: Mutex::new(None),
             };
             let totp_state = totp::TotpState {
                 accounts: Mutex::new(totp::load_accounts()),
@@ -210,12 +211,31 @@ pub fn run() {
             let watcher_app = app.handle().clone();
             let watcher_submenu = clip_submenu.clone();
             std::thread::spawn(move || {
-                let mut cb = match arboard::Clipboard::new() {
-                    Ok(cb) => cb,
-                    Err(_) => return,
-                };
+                // 常驻线程不持有剪贴板读取对象，只观察轻量的变化编号。
+                let mut last_change_count = clipboard::clipboard_change_count();
                 loop {
-                    // 优先读取文本，无文本时读取图片
+                    let current_change_count = clipboard::clipboard_change_count();
+                    if current_change_count.is_some() && current_change_count == last_change_count {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    }
+                    last_change_count = current_change_count;
+
+                    // 通用剪贴板可能先发布占位项，再异步取回内容；等待变化稳定后再读取。
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(350));
+                        let observed = clipboard::clipboard_change_count();
+                        if observed == last_change_count {
+                            break;
+                        }
+                        last_change_count = observed;
+                    }
+                    let mut cb = match arboard::Clipboard::new() {
+                        Ok(cb) => cb,
+                        Err(_) => continue,
+                    };
+
+                    // 仅在剪贴板确实变化并稳定后读取一次；优先文本，无文本时读取图片。
                     let content = if let Ok(text) = cb.get_text() {
                         if text.trim().is_empty() {
                             None
@@ -268,7 +288,7 @@ pub fn run() {
                             let _ = watcher_app.emit("clip-history-changed", ());
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
             });
 

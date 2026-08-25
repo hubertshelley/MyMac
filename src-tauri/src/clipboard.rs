@@ -342,6 +342,18 @@ pub fn clear_history(state: &ClipboardState) -> Result<(), String> {
     save_history(&items)
 }
 
+pub fn clipboard_change_count() -> Option<i64> {
+    #[cfg(target_os = "macos")]
+    {
+        let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+        return Some(pasteboard.changeCount() as i64);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// 读取当前剪贴板内容的指纹（文本优先，其次图片）
 pub fn current_clipboard_fingerprint() -> Option<String> {
     let mut cb = arboard::Clipboard::new().ok()?;
