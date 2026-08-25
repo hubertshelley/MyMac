@@ -6,6 +6,7 @@ use tauri::{
 };
 
 mod apps;
+mod brew;
 mod clipboard;
 mod config;
 mod launch;
@@ -307,6 +308,15 @@ pub fn run() {
             apps::list_apps,
             apps::scan_app_related,
             apps::uninstall_app_items,
+            brew::get_brew_status,
+            brew::start_brew_install,
+            brew::set_brew_source,
+            brew::list_brew_packages,
+            brew::search_brew_packages,
+            brew::install_brew_package,
+            brew::uninstall_brew_package,
+            brew::upgrade_brew_package,
+            brew::upgrade_all_brew_packages,
             launch::list_launch_items,
             launch::set_launch_item,
             launch::delete_launch_item,
