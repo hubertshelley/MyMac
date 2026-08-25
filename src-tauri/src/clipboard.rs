@@ -354,6 +354,23 @@ pub fn clipboard_change_count() -> Option<i64> {
     }
 }
 
+/// macOS 为来自其他设备的通用剪贴板内容添加此类型标记。
+/// 检测时只查询可用类型，不读取实际数据，便于将远程内容延迟到用户粘贴之后再捕获。
+pub fn is_remote_clipboard() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSArray, NSString};
+        let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
+        let remote_type = NSString::from_str("com.apple.is-remote-clipboard");
+        let types = NSArray::from_slice(&[remote_type.as_ref()]);
+        return pasteboard.availableTypeFromArray(&types).is_some();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// 读取当前剪贴板内容的指纹（文本优先，其次图片）
 pub fn current_clipboard_fingerprint() -> Option<String> {
     let mut cb = arboard::Clipboard::new().ok()?;
