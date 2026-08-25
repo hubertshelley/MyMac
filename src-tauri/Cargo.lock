@@ -2342,6 +2342,7 @@ dependencies = [
  "image",
  "keyring",
  "objc2-app-kit",
+ "objc2-foundation",
  "plist",
  "qrcode",
  "rqrr",

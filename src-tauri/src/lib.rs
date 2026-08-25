@@ -230,6 +230,14 @@ pub fn run() {
                         }
                         last_change_count = observed;
                     }
+                    // 远程内容先留给用户实际粘贴；之后若剪贴板仍未变化，再单次读取并纳入历史。
+                    if clipboard::is_remote_clipboard() {
+                        let remote_change_count = last_change_count;
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        if clipboard::clipboard_change_count() != remote_change_count {
+                            continue;
+                        }
+                    }
                     let mut cb = match arboard::Clipboard::new() {
                         Ok(cb) => cb,
                         Err(_) => continue,
