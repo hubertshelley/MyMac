@@ -1,21 +1,33 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
-import { Gauge, AppWindow, Rocket, Settings, ClipboardList } from "@lucide/vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import { listen } from "@tauri-apps/api/event";
+import { Gauge, AppWindow, Rocket, Settings, ClipboardList, KeyRound } from "@lucide/vue";
 import DashboardView from "@/views/DashboardView.vue";
 import AppsView from "@/views/AppsView.vue";
 import LaunchView from "@/views/LaunchView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import ClipboardView from "@/views/ClipboardView.vue";
+import TotpView from "@/views/TotpView.vue";
 import { cn } from "@/lib/utils";
 
-type Tab = "dashboard" | "apps" | "launch" | "clipboard" | "settings";
+type Tab = "dashboard" | "apps" | "launch" | "clipboard" | "totp" | "settings";
 const current = ref<Tab>("dashboard");
+let unlistenNavigation: (() => void) | undefined;
+
+onMounted(async () => {
+  unlistenNavigation = await listen<string>("navigate-to", (event) => {
+    if (event.payload === "totp") current.value = "totp";
+  });
+});
+
+onUnmounted(() => unlistenNavigation?.());
 
 const tabs: { key: Tab; label: string; icon: unknown }[] = [
   { key: "dashboard", label: "资源监控", icon: Gauge },
   { key: "apps", label: "应用卸载", icon: AppWindow },
   { key: "launch", label: "启动项", icon: Rocket },
   { key: "clipboard", label: "粘贴板", icon: ClipboardList },
+  { key: "totp", label: "2FA 验证码", icon: KeyRound },
   { key: "settings", label: "设置", icon: Settings },
 ];
 
@@ -23,6 +35,7 @@ const currentView = computed(() => {
   if (current.value === "apps") return AppsView;
   if (current.value === "launch") return LaunchView;
   if (current.value === "clipboard") return ClipboardView;
+  if (current.value === "totp") return TotpView;
   if (current.value === "settings") return SettingsView;
   return DashboardView;
 });
