@@ -536,6 +536,48 @@ fn search_brew_packages_sync(query: String) -> Result<Vec<BrewPackage>, String> 
     Ok(results)
 }
 
+fn refresh_brew_package_sync(name: String, kind: String) -> Result<BrewPackage, String> {
+    validate_package(&name, &kind)?;
+    if kind == "formula" {
+        let version_output = run_brew(&["list", "--formula", "--versions", &name])?;
+        let mut parts = version_output.split_whitespace();
+        let installed_name = parts.next().unwrap_or(&name);
+        let version = parts.collect::<Vec<_>>().join(", ");
+        let top_level = run_brew(&["leaves"])?
+            .lines()
+            .any(|item| item == installed_name);
+        let outdated = run_brew(&["outdated", "--formula", "--quiet", &name])
+            .is_ok_and(|output| output.lines().any(|item| item == name));
+        return Ok(BrewPackage {
+            name,
+            version,
+            kind,
+            installed: true,
+            outdated,
+            trusted: true,
+            tap: None,
+            top_level,
+        });
+    }
+
+    let (version, tap) = cask_metadata(&name);
+    let trust = load_brew_trust();
+    let trusted = is_cask_trusted(&name, tap.as_deref(), &trust);
+    let outdated = trusted
+        && run_brew(&["outdated", "--cask", "--quiet", &name])
+            .is_ok_and(|output| output.lines().any(|item| item == name));
+    Ok(BrewPackage {
+        name,
+        version,
+        kind,
+        installed: true,
+        outdated,
+        trusted,
+        tap,
+        top_level: true,
+    })
+}
+
 fn package_action(action: &str, name: &str, kind: &str) -> Result<BrewOperationResult, String> {
     validate_package(name, kind)?;
     let flag = if kind == "cask" {
@@ -630,6 +672,13 @@ pub async fn uninstall_brew_package(
     kind: String,
 ) -> Result<BrewOperationResult, String> {
     run_package_action(app, "uninstall", name, kind).await
+}
+
+#[tauri::command]
+pub async fn refresh_brew_package(name: String, kind: String) -> Result<BrewPackage, String> {
+    tauri::async_runtime::spawn_blocking(move || refresh_brew_package_sync(name, kind))
+        .await
+        .map_err(|error| format!("刷新软件状态任务失败：{error}"))?
 }
 
 #[tauri::command]
