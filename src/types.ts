@@ -113,6 +113,15 @@ export interface BrewPackage {
   top_level: boolean;
 }
 
+export interface BrewProgress {
+  operation: string;
+  stage: string;
+  current: number;
+  total: number;
+  percent: number;
+  item: string | null;
+}
+
 export interface BrewOperationResult {
   message: string;
   output: string;

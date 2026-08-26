@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::PathBuf, process::Command};
+use tauri::Emitter;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +51,38 @@ struct BrewTrust {
 pub struct BrewOperationResult {
     message: String,
     output: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct BrewProgress {
+    operation: String,
+    stage: String,
+    current: usize,
+    total: usize,
+    percent: u8,
+    item: Option<String>,
+}
+
+fn emit_progress(
+    app: &tauri::AppHandle,
+    operation: &str,
+    stage: &str,
+    current: usize,
+    total: usize,
+    percent: u8,
+    item: Option<String>,
+) {
+    let _ = app.emit(
+        "brew-progress",
+        BrewProgress {
+            operation: operation.to_string(),
+            stage: stage.to_string(),
+            current,
+            total,
+            percent,
+            item,
+        },
+    );
 }
 
 fn config_path() -> PathBuf {
@@ -278,8 +311,7 @@ fn untrusted_cask_from_error(error: &str) -> Option<(String, String)> {
     Some((name.to_string(), tap.to_string()))
 }
 
-#[tauri::command]
-pub fn get_brew_status() -> BrewStatus {
+fn get_brew_status_sync() -> BrewStatus {
     let source = load_config().source;
     match brew_path() {
         Some(path) => {
@@ -357,8 +389,7 @@ fn set_remote(repository: &str, url: &str) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn set_brew_source(source: BrewSource) -> Result<String, String> {
+fn set_brew_source_sync(source: BrewSource) -> Result<String, String> {
     let (brew_url, core_url, cask_url) = source_urls(&source);
     let brew_repo = run_brew(&["--repository"])?;
     set_remote(&brew_repo, brew_url)?;
@@ -373,17 +404,10 @@ pub fn set_brew_source(source: BrewSource) -> Result<String, String> {
     Ok("软件源已切换".to_string())
 }
 
-#[tauri::command]
-pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
+fn list_brew_packages_sync() -> Result<Vec<BrewPackage>, String> {
     let top_level_formulae: HashSet<String> =
         run_brew(&["leaves"])?.lines().map(str::to_string).collect();
     let outdated_formula: HashSet<String> = run_brew(&["outdated", "--formula", "--quiet"])
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    // 未信任的第三方 cask 会令整个命令失败，此时只放弃 cask 更新状态，继续加载列表。
-    let outdated_cask: HashSet<String> = run_brew(&["outdated", "--cask", "--quiet"])
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
@@ -400,8 +424,12 @@ pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
     for name in installed_cask_names()? {
         let (version, tap) = cask_metadata(&name);
         let trusted = is_cask_trusted(&name, tap.as_deref(), &trust);
+        // 逐个检查可信 cask，避免一个未信任项目让全部 cask 的更新状态丢失。
+        let outdated = trusted
+            && run_brew(&["outdated", "--cask", "--quiet", &name])
+                .is_ok_and(|output| output.lines().any(|item| item == name));
         packages.push(BrewPackage {
-            outdated: trusted && outdated_cask.contains(&name),
+            outdated,
             installed: true,
             version,
             kind: "cask".to_string(),
@@ -415,8 +443,7 @@ pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
     Ok(packages)
 }
 
-#[tauri::command]
-pub fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
+fn get_brew_dependencies_sync(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
     validate_package(&name, &kind)?;
     if kind == "cask" {
         return Ok(Vec::new());
@@ -448,13 +475,12 @@ pub fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPacka
     Ok(dependencies)
 }
 
-#[tauri::command]
-pub fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
+fn search_brew_packages_sync(query: String) -> Result<Vec<BrewPackage>, String> {
     let query = query.trim();
     if query.len() < 2 || query.len() > 100 || query.starts_with('-') {
         return Err("请输入至少 2 个字符的软件名称".to_string());
     }
-    let installed = list_brew_packages().unwrap_or_default();
+    let installed = list_brew_packages_sync().unwrap_or_default();
     let mut results = Vec::new();
     for (kind, flag) in [("formula", "--formula"), ("cask", "--cask")] {
         let output = match run_brew(&["search", flag, query]) {
@@ -529,31 +555,171 @@ fn package_action(action: &str, name: &str, kind: &str) -> Result<BrewOperationR
 }
 
 #[tauri::command]
-pub fn install_brew_package(name: String, kind: String) -> Result<BrewOperationResult, String> {
-    package_action("install", &name, &kind)
+pub async fn get_brew_status() -> Result<BrewStatus, String> {
+    tauri::async_runtime::spawn_blocking(get_brew_status_sync)
+        .await
+        .map_err(|error| format!("读取 Homebrew 状态失败：{error}"))
 }
 
 #[tauri::command]
-pub fn uninstall_brew_package(name: String, kind: String) -> Result<BrewOperationResult, String> {
-    package_action("uninstall", &name, &kind)
+pub async fn set_brew_source(app: tauri::AppHandle, source: BrewSource) -> Result<String, String> {
+    emit_progress(&app, "source", "正在切换软件源", 0, 1, 15, None);
+    let result = tauri::async_runtime::spawn_blocking(move || set_brew_source_sync(source))
+        .await
+        .map_err(|error| format!("切换软件源任务失败：{error}"))?;
+    emit_progress(&app, "source", "软件源切换完成", 1, 1, 100, None);
+    result
 }
 
 #[tauri::command]
-pub fn upgrade_brew_package(name: String, kind: String) -> Result<BrewOperationResult, String> {
-    package_action("upgrade", &name, &kind)
+pub async fn list_brew_packages(app: tauri::AppHandle) -> Result<Vec<BrewPackage>, String> {
+    emit_progress(&app, "load", "正在读取顶层软件", 0, 3, 10, None);
+    let result = tauri::async_runtime::spawn_blocking(list_brew_packages_sync)
+        .await
+        .map_err(|error| format!("读取软件列表任务失败：{error}"))?;
+    emit_progress(&app, "load", "软件列表加载完成", 3, 3, 100, None);
+    result
 }
 
 #[tauri::command]
-pub fn upgrade_all_brew_packages() -> Result<BrewOperationResult, String> {
-    let update = run_brew(&["update"])?;
-    let upgrade = run_brew(&["upgrade"])?;
-    let cask = run_brew(&["upgrade", "--cask"]).unwrap_or_else(|error| error);
+pub async fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_brew_dependencies_sync(name, kind))
+        .await
+        .map_err(|error| format!("读取依赖任务失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
+    tauri::async_runtime::spawn_blocking(move || search_brew_packages_sync(query))
+        .await
+        .map_err(|error| format!("搜索软件任务失败：{error}"))?
+}
+
+async fn run_package_action(
+    app: tauri::AppHandle,
+    action: &'static str,
+    name: String,
+    kind: String,
+) -> Result<BrewOperationResult, String> {
+    let stage = match action {
+        "install" => "正在安装软件",
+        "uninstall" => "正在卸载软件",
+        _ => "正在更新软件",
+    };
+    emit_progress(&app, action, stage, 0, 1, 10, Some(name.clone()));
+    let result = tauri::async_runtime::spawn_blocking(move || package_action(action, &name, &kind))
+        .await
+        .map_err(|error| format!("Homebrew 后台任务失败：{error}"))?;
+    emit_progress(&app, action, "操作完成", 1, 1, 100, None);
+    result
+}
+
+#[tauri::command]
+pub async fn install_brew_package(
+    app: tauri::AppHandle,
+    name: String,
+    kind: String,
+) -> Result<BrewOperationResult, String> {
+    run_package_action(app, "install", name, kind).await
+}
+
+#[tauri::command]
+pub async fn uninstall_brew_package(
+    app: tauri::AppHandle,
+    name: String,
+    kind: String,
+) -> Result<BrewOperationResult, String> {
+    run_package_action(app, "uninstall", name, kind).await
+}
+
+#[tauri::command]
+pub async fn upgrade_brew_package(
+    app: tauri::AppHandle,
+    name: String,
+    kind: String,
+) -> Result<BrewOperationResult, String> {
+    run_package_action(app, "upgrade", name, kind).await
+}
+
+fn upgrade_top_level_packages(app: &tauri::AppHandle) -> Result<BrewOperationResult, String> {
+    emit_progress(app, "upgrade-all", "正在更新 Homebrew 索引", 0, 1, 5, None);
+    let update_output = run_brew(&["update"])?;
+    emit_progress(app, "upgrade-all", "正在检查顶层软件更新", 0, 1, 15, None);
+
+    let packages = list_brew_packages_sync()?;
+    let targets = packages
+        .into_iter()
+        .filter(|item| item.top_level && item.outdated && item.trusted)
+        .collect::<Vec<_>>();
+    let total = targets.len();
+    if total == 0 {
+        emit_progress(app, "upgrade-all", "所有顶层软件均为最新", 0, 0, 100, None);
+        return Ok(BrewOperationResult {
+            message: "所有顶层软件均为最新".to_string(),
+            output: update_output,
+        });
+    }
+
+    let mut outputs = vec![update_output];
+    let mut failures = Vec::new();
+    for (index, item) in targets.into_iter().enumerate() {
+        let current = index + 1;
+        let percent = 15 + ((current * 85 / total) as u8);
+        emit_progress(
+            app,
+            "upgrade-all",
+            "正在更新顶层软件",
+            index,
+            total,
+            percent.saturating_sub(1),
+            Some(item.name.clone()),
+        );
+        match package_action("upgrade", &item.name, &item.kind) {
+            Ok(result) => outputs.push(result.output),
+            Err(error) => failures.push(format!("{}：{}", item.name, error)),
+        }
+        emit_progress(
+            app,
+            "upgrade-all",
+            "正在更新顶层软件",
+            current,
+            total,
+            percent,
+            Some(item.name),
+        );
+    }
+    if !failures.is_empty() {
+        outputs.push(format!("以下软件更新失败：\n{}", failures.join("\n")));
+    }
+    emit_progress(
+        app,
+        "upgrade-all",
+        "顶层软件更新完成",
+        total,
+        total,
+        100,
+        None,
+    );
     Ok(BrewOperationResult {
-        message: "Homebrew 和全部软件已更新".to_string(),
-        output: [update, upgrade, cask]
+        message: if failures.is_empty() {
+            format!("已更新 {total} 个顶层软件")
+        } else {
+            format!("顶层软件更新完成，{} 个失败", failures.len())
+        },
+        output: outputs
             .into_iter()
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n"),
     })
+}
+
+#[tauri::command]
+pub async fn upgrade_all_brew_packages(
+    app: tauri::AppHandle,
+) -> Result<BrewOperationResult, String> {
+    let progress_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || upgrade_top_level_packages(&progress_app))
+        .await
+        .map_err(|error| format!("批量更新后台任务失败：{error}"))?
 }

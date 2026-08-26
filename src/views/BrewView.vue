@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Download,
   ChevronDown,
@@ -16,12 +17,14 @@ import {
 import type {
   BrewOperationResult,
   BrewPackage,
+  BrewProgress,
   BrewSource,
   BrewStatus,
 } from "@/types";
 import Badge from "@/components/ui/Badge.vue";
 import Button from "@/components/ui/Button.vue";
 import Card from "@/components/ui/Card.vue";
+import Progress from "@/components/ui/Progress.vue";
 
 const status = ref<BrewStatus | null>(null);
 const packages = ref<BrewPackage[]>([]);
@@ -33,6 +36,8 @@ const message = ref("");
 const error = ref("");
 const output = ref("");
 const section = ref<"installed" | "search">("installed");
+const progress = ref<BrewProgress | null>(null);
+let unlistenProgress: (() => void) | undefined;
 
 interface BrewTreeNode extends BrewPackage {
   nodeId: string;
@@ -75,7 +80,21 @@ const sourceOptions: { value: BrewSource; label: string }[] = [
   { value: "ustc", label: "中科大" },
 ];
 
-const outdatedCount = computed(() => packages.value.filter((item) => item.outdated).length);
+const outdatedTopLevel = computed(() =>
+  packages.value.filter((item) => item.top_level && item.outdated && item.trusted)
+);
+const outdatedCount = computed(() => outdatedTopLevel.value.length);
+
+function beginProgress(operation: string, stage: string) {
+  progress.value = { operation, stage, current: 0, total: 1, percent: 5, item: null };
+}
+
+function finishProgress() {
+  if (progress.value) progress.value = { ...progress.value, percent: 100 };
+  window.setTimeout(() => {
+    if (!busy.value) progress.value = null;
+  }, 800);
+}
 
 function showError(value: unknown) {
   error.value = String(value);
@@ -84,6 +103,7 @@ function showError(value: unknown) {
 
 async function load() {
   loading.value = true;
+  beginProgress("load", "正在读取 Homebrew 状态");
   error.value = "";
   try {
     status.value = await invoke<BrewStatus>("get_brew_status");
@@ -97,10 +117,18 @@ async function load() {
     showError(e);
   } finally {
     loading.value = false;
+    finishProgress();
   }
 }
 
-onMounted(load);
+onMounted(async () => {
+  unlistenProgress = await listen<BrewProgress>("brew-progress", (event) => {
+    progress.value = event.payload;
+  });
+  await load();
+});
+
+onUnmounted(() => unlistenProgress?.());
 
 async function installBrew() {
   busy.value = "install-brew";
@@ -111,6 +139,7 @@ async function installBrew() {
     showError(e);
   } finally {
     busy.value = "";
+    finishProgress();
   }
 }
 
@@ -118,6 +147,7 @@ async function changeSource(event: Event) {
   const source = (event.target as HTMLSelectElement).value as BrewSource;
   if (!status.value || source === status.value.source) return;
   busy.value = "source";
+  beginProgress("source", "正在切换软件源");
   try {
     message.value = await invoke<string>("set_brew_source", { source });
     status.value.source = source;
@@ -127,6 +157,7 @@ async function changeSource(event: Event) {
     (event.target as HTMLSelectElement).value = status.value.source;
   } finally {
     busy.value = "";
+    finishProgress();
   }
 }
 
@@ -136,6 +167,7 @@ async function search() {
     return;
   }
   busy.value = "search";
+  beginProgress("search", "正在搜索软件");
   error.value = "";
   try {
     results.value = await invoke<BrewPackage[]>("search_brew_packages", {
@@ -146,6 +178,7 @@ async function search() {
     showError(e);
   } finally {
     busy.value = "";
+    finishProgress();
   }
 }
 
@@ -178,6 +211,7 @@ async function runPackageAction(action: "install" | "uninstall" | "upgrade", ite
   if (action === "uninstall" && !window.confirm(`确定要卸载「${item.name}」吗？`)) return;
   const command = `${action}_brew_package`;
   busy.value = `${action}:${item.kind}:${item.name}`;
+  beginProgress(action, `${action === "install" ? "正在安装" : action === "uninstall" ? "正在卸载" : "正在更新"} ${item.name}`);
   try {
     const result = await invoke<BrewOperationResult>(command, {
       name: item.name,
@@ -192,12 +226,19 @@ async function runPackageAction(action: "install" | "uninstall" | "upgrade", ite
     showError(e);
   } finally {
     busy.value = "";
+    finishProgress();
   }
 }
 
 async function upgradeAll() {
-  if (!window.confirm("将更新 Homebrew 索引和全部过期软件，是否继续？")) return;
+  const names = outdatedTopLevel.value.map((item) => item.name);
+  if (!names.length) {
+    message.value = "当前没有需要更新的顶层软件";
+    return;
+  }
+  if (!window.confirm(`将更新以下 ${names.length} 个顶层软件：\n\n${names.join("、")}\n\n是否继续？`)) return;
   busy.value = "upgrade-all";
+  beginProgress("upgrade-all", "正在准备顶层软件更新");
   try {
     const result = await invoke<BrewOperationResult>("upgrade_all_brew_packages");
     message.value = result.message;
@@ -208,6 +249,7 @@ async function upgradeAll() {
     showError(e);
   } finally {
     busy.value = "";
+    finishProgress();
   }
 }
 
@@ -218,8 +260,11 @@ function kindLabel(kind: BrewPackage["kind"]) {
 
 <template>
   <div class="space-y-4">
-    <Card v-if="loading" class="flex items-center justify-center gap-2 p-12 text-sm text-muted-foreground">
-      <LoaderCircle class="size-4 animate-spin" /> 正在读取 Homebrew 信息…
+    <Card v-if="loading" class="space-y-3 p-10 text-sm text-muted-foreground">
+      <div class="flex items-center justify-center gap-2">
+        <LoaderCircle class="size-4 animate-spin" /> {{ progress?.stage || "正在读取 Homebrew 信息…" }}
+      </div>
+      <Progress :value="progress?.percent || 5" />
     </Card>
 
     <template v-else-if="status">
@@ -310,6 +355,19 @@ function kindLabel(kind: BrewPackage["kind"]) {
             <Search v-else /> 搜索
           </Button>
         </form>
+
+        <Card v-if="progress" class="space-y-2 p-4">
+          <div class="flex items-center justify-between gap-4 text-sm">
+            <div class="min-w-0">
+              <span class="font-medium">{{ progress.stage }}</span>
+              <span v-if="progress.item" class="ml-2 text-muted-foreground">{{ progress.item }}</span>
+            </div>
+            <span class="shrink-0 text-xs text-muted-foreground">
+              {{ progress.total > 1 ? `${progress.current} / ${progress.total}` : `${progress.percent}%` }}
+            </span>
+          </div>
+          <Progress :value="progress.percent" />
+        </Card>
 
         <div v-if="message" class="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{{ message }}</div>
         <div v-if="error" class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{{ error }}</div>
