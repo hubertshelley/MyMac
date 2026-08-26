@@ -316,6 +316,7 @@ pub fn run() {
             brew::search_brew_packages,
             brew::install_brew_package,
             brew::uninstall_brew_package,
+            brew::refresh_brew_package,
             brew::upgrade_brew_package,
             brew::upgrade_all_brew_packages,
             launch::list_launch_items,

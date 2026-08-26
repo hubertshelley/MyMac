@@ -37,6 +37,8 @@ const error = ref("");
 const output = ref("");
 const section = ref<"installed" | "search">("installed");
 const progress = ref<BrewProgress | null>(null);
+const upgradeTargets = ref<string[]>([]);
+const showUpgradeConfirm = ref(false);
 let unlistenProgress: (() => void) | undefined;
 
 interface BrewTreeNode extends BrewPackage {
@@ -207,6 +209,27 @@ async function toggleDependencies(node: BrewTreeNode) {
   }
 }
 
+function updateTreePackage(nodes: BrewTreeNode[], updated: BrewPackage) {
+  for (const node of nodes) {
+    if (node.name === updated.name && node.kind === updated.kind) {
+      Object.assign(node, updated);
+    }
+    updateTreePackage(node.children, updated);
+  }
+}
+
+function applyPackageUpdate(updated: BrewPackage) {
+  const index = packages.value.findIndex(
+    (item) => item.name === updated.name && item.kind === updated.kind
+  );
+  if (index >= 0) packages.value[index] = updated;
+  updateTreePackage(treeRoots.value, updated);
+  const resultIndex = results.value.findIndex(
+    (item) => item.name === updated.name && item.kind === updated.kind
+  );
+  if (resultIndex >= 0) results.value[resultIndex] = updated;
+}
+
 async function runPackageAction(action: "install" | "uninstall" | "upgrade", item: BrewPackage) {
   if (action === "uninstall" && !window.confirm(`确定要卸载「${item.name}」吗？`)) return;
   const command = `${action}_brew_package`;
@@ -220,8 +243,16 @@ async function runPackageAction(action: "install" | "uninstall" | "upgrade", ite
     message.value = result.message;
     output.value = result.output;
     error.value = "";
-    await load();
-    if (section.value === "search") await search();
+    if (action === "upgrade") {
+      const updated = await invoke<BrewPackage>("refresh_brew_package", {
+        name: item.name,
+        kind: item.kind,
+      });
+      applyPackageUpdate(updated);
+    } else {
+      await load();
+      if (section.value === "search") await search();
+    }
   } catch (e) {
     showError(e);
   } finally {
@@ -230,13 +261,20 @@ async function runPackageAction(action: "install" | "uninstall" | "upgrade", ite
   }
 }
 
-async function upgradeAll() {
+function upgradeAll() {
   const names = outdatedTopLevel.value.map((item) => item.name);
   if (!names.length) {
     message.value = "当前没有需要更新的顶层软件";
+    error.value = "";
+    upgradeTargets.value = [];
     return;
   }
-  if (!window.confirm(`将更新以下 ${names.length} 个顶层软件：\n\n${names.join("、")}\n\n是否继续？`)) return;
+  upgradeTargets.value = names;
+  showUpgradeConfirm.value = true;
+}
+
+async function confirmUpgradeAll() {
+  showUpgradeConfirm.value = false;
   busy.value = "upgrade-all";
   beginProgress("upgrade-all", "正在准备顶层软件更新");
   try {
@@ -251,6 +289,12 @@ async function upgradeAll() {
     busy.value = "";
     finishProgress();
   }
+}
+
+function cancelUpgradeAll() {
+  showUpgradeConfirm.value = false;
+  upgradeTargets.value = [];
+  message.value = "已取消更新";
 }
 
 function kindLabel(kind: BrewPackage["kind"]) {
@@ -355,6 +399,29 @@ function kindLabel(kind: BrewPackage["kind"]) {
             <Search v-else /> 搜索
           </Button>
         </form>
+
+        <div v-if="showUpgradeConfirm" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-6" @click.self="cancelUpgradeAll">
+          <Card class="w-full max-w-xl p-5 shadow-xl">
+            <h2 class="text-lg font-semibold">确认更新顶层软件</h2>
+            <p class="mt-1 text-sm text-muted-foreground">
+              将更新以下 {{ upgradeTargets.length }} 个顶层软件，仅作为依赖安装的软件不会单独更新。
+            </p>
+            <div class="mt-4 flex max-h-48 flex-wrap gap-1.5 overflow-y-auto rounded-md border p-3">
+              <Badge v-for="name in upgradeTargets" :key="name" variant="outline">{{ name }}</Badge>
+            </div>
+            <div class="mt-5 flex justify-end gap-2">
+              <Button variant="outline" @click="cancelUpgradeAll">取消</Button>
+              <Button @click="confirmUpgradeAll"><Upload /> 开始更新</Button>
+            </div>
+          </Card>
+        </div>
+
+        <Card v-if="upgradeTargets.length && busy === 'upgrade-all'" class="p-4">
+          <p class="mb-2 text-sm font-medium">本次更新的顶层软件（{{ upgradeTargets.length }}）</p>
+          <div class="flex flex-wrap gap-1.5">
+            <Badge v-for="name in upgradeTargets" :key="name" variant="outline">{{ name }}</Badge>
+          </div>
+        </Card>
 
         <Card v-if="progress" class="space-y-2 p-4">
           <div class="flex items-center justify-between gap-4 text-sm">
