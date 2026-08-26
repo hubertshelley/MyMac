@@ -37,6 +37,7 @@ pub struct BrewPackage {
     outdated: bool,
     trusted: bool,
     tap: Option<String>,
+    top_level: bool,
 }
 
 #[derive(Default, Deserialize)]
@@ -156,7 +157,12 @@ fn validate_package(name: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_version_lines(text: &str, kind: &str, outdated: &HashSet<String>) -> Vec<BrewPackage> {
+fn parse_version_lines(
+    text: &str,
+    kind: &str,
+    outdated: &HashSet<String>,
+    top_level: &HashSet<String>,
+) -> Vec<BrewPackage> {
     text.lines()
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
@@ -165,6 +171,7 @@ fn parse_version_lines(text: &str, kind: &str, outdated: &HashSet<String>) -> Ve
                 version: parts.collect::<Vec<_>>().join(", "),
                 installed: true,
                 outdated: outdated.contains(&name),
+                top_level: top_level.contains(&name),
                 name,
                 kind: kind.to_string(),
                 trusted: true,
@@ -172,6 +179,27 @@ fn parse_version_lines(text: &str, kind: &str, outdated: &HashSet<String>) -> Ve
             })
         })
         .collect()
+}
+
+fn installed_formulae(
+    outdated: &HashSet<String>,
+    top_level: &HashSet<String>,
+) -> Result<Vec<BrewPackage>, String> {
+    Ok(parse_version_lines(
+        &run_brew(&["list", "--formula", "--versions"])?,
+        "formula",
+        outdated,
+        top_level,
+    ))
+}
+
+fn direct_formula_dependencies(name: &str) -> Result<Vec<String>, String> {
+    Ok(
+        run_brew(&["deps", "--installed", "--direct", "--formula", name])?
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 fn brew_prefix() -> Option<PathBuf> {
@@ -347,6 +375,8 @@ pub fn set_brew_source(source: BrewSource) -> Result<String, String> {
 
 #[tauri::command]
 pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
+    let top_level_formulae: HashSet<String> =
+        run_brew(&["leaves"])?.lines().map(str::to_string).collect();
     let outdated_formula: HashSet<String> = run_brew(&["outdated", "--formula", "--quiet"])
         .unwrap_or_default()
         .lines()
@@ -362,6 +392,7 @@ pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
         &run_brew(&["list", "--formula", "--versions"])?,
         "formula",
         &outdated_formula,
+        &top_level_formulae,
     );
 
     // 版本列表会加载所有 cask 定义；改用安全的名称列表和本地安装收据，避免单项失败阻断页面。
@@ -377,10 +408,44 @@ pub fn list_brew_packages() -> Result<Vec<BrewPackage>, String> {
             name,
             trusted,
             tap,
+            top_level: true,
         });
     }
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(packages)
+}
+
+#[tauri::command]
+pub fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
+    validate_package(&name, &kind)?;
+    if kind == "cask" {
+        return Ok(Vec::new());
+    }
+
+    // 展开节点时只读取 formula 数据，避免重新扫描 cask、信任状态和全部过期软件。
+    // 依赖名称来自独立的直接依赖命令，再与已安装 formula 版本表匹配。
+    let empty = HashSet::new();
+    let installed = installed_formulae(&empty, &empty)?;
+    let by_name: std::collections::HashMap<&str, &BrewPackage> = installed
+        .iter()
+        .map(|item| (item.name.as_str(), item))
+        .collect();
+    let mut dependencies = direct_formula_dependencies(&name)?
+        .into_iter()
+        .filter_map(|dependency| by_name.get(dependency.as_str()).copied())
+        .map(|item| BrewPackage {
+            name: item.name.clone(),
+            version: item.version.clone(),
+            kind: item.kind.clone(),
+            installed: true,
+            outdated: false,
+            trusted: true,
+            tap: None,
+            top_level: false,
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(dependencies)
 }
 
 #[tauri::command]
@@ -408,6 +473,7 @@ pub fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
                             outdated: false,
                             trusted: false,
                             tap: Some(tap),
+                            top_level: current.top_level,
                         });
                         continue;
                     }
@@ -435,6 +501,7 @@ pub fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
                 outdated: current.is_some_and(|item| item.outdated),
                 trusted: current.is_none_or(|item| item.trusted),
                 tap: current.and_then(|item| item.tap.clone()),
+                top_level: current.is_none_or(|item| item.top_level),
             });
         }
     }

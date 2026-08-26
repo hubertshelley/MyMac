@@ -312,6 +312,7 @@ pub fn run() {
             brew::start_brew_install,
             brew::set_brew_source,
             brew::list_brew_packages,
+            brew::get_brew_dependencies,
             brew::search_brew_packages,
             brew::install_brew_package,
             brew::uninstall_brew_package,
