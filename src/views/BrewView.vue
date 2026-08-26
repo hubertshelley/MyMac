@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Download,
+  ChevronDown,
+  ChevronRight,
   LoaderCircle,
   Package,
   RefreshCw,
@@ -32,6 +34,41 @@ const error = ref("");
 const output = ref("");
 const section = ref<"installed" | "search">("installed");
 
+interface BrewTreeNode extends BrewPackage {
+  nodeId: string;
+  depth: number;
+  expanded: boolean;
+  loadingChildren: boolean;
+  childrenLoaded: boolean;
+  children: BrewTreeNode[];
+}
+
+const treeRoots = ref<BrewTreeNode[]>([]);
+
+function createTreeNode(item: BrewPackage, depth: number, parentId = "root"): BrewTreeNode {
+  return {
+    ...item,
+    nodeId: `${parentId}/${item.kind}:${item.name}`,
+    depth,
+    expanded: false,
+    loadingChildren: false,
+    childrenLoaded: item.kind === "cask",
+    children: [],
+  };
+}
+
+const visibleInstalledNodes = computed(() => {
+  const visible: BrewTreeNode[] = [];
+  const append = (nodes: BrewTreeNode[]) => {
+    for (const node of nodes) {
+      visible.push(node);
+      if (node.expanded) append(node.children);
+    }
+  };
+  append(treeRoots.value);
+  return visible;
+});
+
 const sourceOptions: { value: BrewSource; label: string }[] = [
   { value: "official", label: "官方源" },
   { value: "tsinghua", label: "清华大学" },
@@ -53,6 +90,9 @@ async function load() {
     packages.value = status.value.installed
       ? await invoke<BrewPackage[]>("list_brew_packages")
       : [];
+    treeRoots.value = packages.value
+      .filter((item) => item.top_level)
+      .map((item) => createTreeNode(item, 0));
   } catch (e) {
     showError(e);
   } finally {
@@ -106,6 +146,31 @@ async function search() {
     showError(e);
   } finally {
     busy.value = "";
+  }
+}
+
+async function toggleDependencies(node: BrewTreeNode) {
+  if (node.kind === "cask") return;
+  if (node.childrenLoaded) {
+    node.expanded = !node.expanded;
+    return;
+  }
+  node.loadingChildren = true;
+  error.value = "";
+  try {
+    const dependencies = await invoke<BrewPackage[]>("get_brew_dependencies", {
+      name: node.name,
+      kind: node.kind,
+    });
+    node.children = dependencies.map((item) =>
+      createTreeNode(item, node.depth + 1, node.nodeId)
+    );
+    node.childrenLoaded = true;
+    node.expanded = node.children.length > 0;
+  } catch (e) {
+    showError(e);
+  } finally {
+    node.loadingChildren = false;
   }
 }
 
@@ -219,7 +284,7 @@ function kindLabel(kind: BrewPackage["kind"]) {
             :class="section === 'installed' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'"
             @click="section = 'installed'"
           >
-            已安装（{{ packages.length }}）
+            已安装（{{ treeRoots.length }} 个顶层软件）
           </button>
           <button
             class="border-b-2 px-3 py-2 text-sm font-medium"
@@ -256,10 +321,24 @@ function kindLabel(kind: BrewPackage["kind"]) {
         <Card class="overflow-hidden">
           <ul class="divide-y divide-border">
             <li
-              v-for="item in section === 'installed' ? packages : results"
-              :key="`${item.kind}:${item.name}`"
+              v-for="item in section === 'installed' ? visibleInstalledNodes : results"
+              :key="section === 'installed' ? (item as BrewTreeNode).nodeId : `${item.kind}:${item.name}`"
               class="flex items-center gap-3 px-4 py-3"
+              :style="section === 'installed' ? { paddingLeft: `${16 + (item as BrewTreeNode).depth * 24}px` } : undefined"
             >
+              <button
+                v-if="section === 'installed' && item.kind === 'formula' && (!(item as BrewTreeNode).childrenLoaded || (item as BrewTreeNode).children.length > 0)"
+                type="button"
+                class="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted"
+                :disabled="(item as BrewTreeNode).loadingChildren"
+                :title="(item as BrewTreeNode).expanded ? '收起依赖' : '展开直接依赖'"
+                @click="toggleDependencies(item as BrewTreeNode)"
+              >
+                <LoaderCircle v-if="(item as BrewTreeNode).loadingChildren" class="size-4 animate-spin" />
+                <ChevronDown v-else-if="(item as BrewTreeNode).expanded" class="size-4" />
+                <ChevronRight v-else class="size-4" />
+              </button>
+              <span v-else-if="section === 'installed'" class="size-6 shrink-0" />
               <div class="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                 <Package class="size-4" />
               </div>
@@ -267,6 +346,7 @@ function kindLabel(kind: BrewPackage["kind"]) {
                 <div class="flex items-center gap-2">
                   <span class="truncate text-sm font-medium">{{ item.name }}</span>
                   <Badge variant="outline">{{ kindLabel(item.kind) }}</Badge>
+                  <Badge v-if="section === 'installed' && !(item as BrewTreeNode).top_level" variant="secondary">依赖</Badge>
                   <Badge v-if="!item.trusted" variant="destructive" :title="item.tap ? `来源：${item.tap}` : undefined">
                     来源未信任
                   </Badge>
@@ -306,7 +386,7 @@ function kindLabel(kind: BrewPackage["kind"]) {
             </li>
           </ul>
           <div
-            v-if="!(section === 'installed' ? packages : results).length"
+            v-if="!(section === 'installed' ? visibleInstalledNodes : results).length"
             class="p-10 text-center text-sm text-muted-foreground"
           >
             {{ section === "installed" ? "暂无已安装软件" : "输入名称搜索软件" }}

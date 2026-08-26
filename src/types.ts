@@ -110,6 +110,7 @@ export interface BrewPackage {
   outdated: boolean;
   trusted: boolean;
   tap: string | null;
+  top_level: boolean;
 }
 
 export interface BrewOperationResult {
