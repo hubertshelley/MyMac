@@ -60,7 +60,10 @@ const display = ref<OverlayDisplay>({
   imageUrl: "",
 });
 const windows = ref<CaptureWindowInfo[]>([]);
-const ready = ref(false);
+/** 会话上下文是否就绪（覆盖窗口已显示加载态） */
+const sessionReady = ref(false);
+/** 冻结背景是否已就绪（就绪后才能框选交互） */
+const backgroundReady = ref(false);
 
 const phase = ref<"idle" | "edit">("idle");
 const hoverWindow = ref<CaptureWindowInfo | null>(null);
@@ -111,37 +114,53 @@ const primaryActionClass =
 // ---------------------------------------------------------------------------
 
 onMounted(async () => {
+  window.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("blur", onWindowBlur);
   try {
     const context = await invoke<{ sessionId: string; display: OverlayDisplay; windows: CaptureWindowInfo[] }>(
       "get_capture_context",
     );
     display.value = context.display;
     windows.value = context.windows;
+    // 先呈现加载态，再异步等待后台编码写出的背景文件
+    sessionReady.value = true;
     bgSrc.value = await loadBackground(context.display.imageUrl);
-    ready.value = true;
+    backgroundReady.value = true;
     await nextTick();
     render();
   } catch (error) {
     showTip(`初始化截图失败：${error}`);
   }
-  window.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("blur", onWindowBlur);
 });
 
 /**
  * 加载冻结背景图。
+ * 背景文件由后台线程编码写出，可能晚于覆盖窗口出现，因此带轮询重试；
  * 优先 fetch asset 地址转 blob URL：二进制直传且同源，canvas 不会被污染；
  * fetch 失败时回退到 base64 数据 URL（同样不污染 canvas）。
  */
 async function loadBackground(imagePath: string): Promise<string> {
+  const deadline = Date.now() + 15_000;
+  let lastError: unknown = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(convertFileSrc(imagePath));
+      if (response.ok) {
+        const blob = await response.blob();
+        return URL.createObjectURL(blob);
+      }
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  // asset 通道失败时回退 base64（后台编码完成后必然可读）
   try {
-    const response = await fetch(convertFileSrc(imagePath));
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
-  } catch {
     const background = await invoke<string>("get_capture_background");
     return `data:image/png;base64,${background}`;
+  } catch (error) {
+    throw lastError ?? error;
   }
 }
 
@@ -228,7 +247,7 @@ function hitHandle(px: number, py: number): Handle | null {
 // ---------------------------------------------------------------------------
 
 function onMouseDown(event: MouseEvent) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || !backgroundReady.value) return;
   const px = event.clientX;
   const py = event.clientY;
 
@@ -293,6 +312,7 @@ function onMouseDown(event: MouseEvent) {
 }
 
 function onMouseMove(event: MouseEvent) {
+  if (!backgroundReady.value) return;
   const px = event.clientX;
   const py = event.clientY;
 
@@ -769,27 +789,37 @@ const textStyle = computed(() => {
 
 <template>
   <div
-    v-if="ready"
+    v-if="sessionReady"
     class="fixed inset-0 select-none overflow-hidden"
     @mousedown="onMouseDown"
     @mousemove="onMouseMove"
     @mouseup="onMouseUp"
   >
-    <!-- 冻结的全屏背景 -->
-    <img
-      ref="bgImage"
-      :src="bgSrc"
-      alt=""
-      draggable="false"
-      class="pointer-events-none absolute inset-0 h-full w-full"
-    />
+    <template v-if="backgroundReady">
+      <!-- 冻结的全屏背景 -->
+      <img
+        ref="bgImage"
+        :src="bgSrc"
+        alt=""
+        draggable="false"
+        class="pointer-events-none absolute inset-0 h-full w-full"
+      />
 
-    <!-- 遮罩 / 选区 / 标注 -->
-    <canvas
-      ref="canvasEl"
-      class="pointer-events-none absolute inset-0"
-      :style="{ width: `${display.width}px`, height: `${display.height}px` }"
-    ></canvas>
+      <!-- 遮罩 / 选区 / 标注 -->
+      <canvas
+        ref="canvasEl"
+        class="pointer-events-none absolute inset-0"
+        :style="{ width: `${display.width}px`, height: `${display.height}px` }"
+      ></canvas>
+    </template>
+
+    <!-- 背景编码中的加载态 -->
+    <div
+      v-else
+      class="absolute inset-0 flex items-center justify-center bg-black/85"
+    >
+      <span class="text-sm tracking-widest text-white/70">正在捕获屏幕…</span>
+    </div>
 
     <!-- 文本标注输入框 -->
     <input
