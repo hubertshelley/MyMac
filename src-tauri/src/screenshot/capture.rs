@@ -22,6 +22,15 @@ extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
+#[link(name = "CoreServices", kind = "framework")]
+extern "C" {
+    pub(crate) fn SetSystemUIMode(mode: u32, options: u32);
+}
+
+pub(crate) const K_UI_MODE_NORMAL: u32 = 0;
+// 隐藏菜单栏与 Dock，避免其窗口层级高于截图覆盖层造成遮挡
+pub(crate) const K_UI_MODE_ALL_SUPPRESSED: u32 = 4;
+
 /// 是否已授予屏幕录制权限
 pub fn has_screen_capture_access() -> bool {
     unsafe { CGPreflightScreenCaptureAccess() }

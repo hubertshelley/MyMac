@@ -148,6 +148,9 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
 
     let grabbed = grab_displays_on_main(app, &displays)?;
 
+    // 抓屏完成后隐藏 Dock 与菜单栏，避免遮挡覆盖层与工具栏
+    suppress_system_ui(app);
+
     let mut overlays = Vec::with_capacity(displays.len());
     for display in &displays {
         let png_bytes = grabbed
@@ -172,7 +175,7 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
     // 为每块屏幕创建覆盖窗口
     for (index, overlay) in overlays.iter().enumerate() {
         let label = format!("screenshot-{session_id}-{index}");
-        WebviewWindowBuilder::new(
+        let build_result = WebviewWindowBuilder::new(
             app,
             &label,
             WebviewUrl::App("index.html?mode=screenshot".into()),
@@ -189,8 +192,15 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         .skip_taskbar(true)
         .shadow(false)
         .focused(index == 0)
-        .build()
-        .map_err(|e| format!("创建截图覆盖层失败：{e}"))?;
+        .build();
+        if let Err(error) = build_result {
+            // 建窗失败时恢复系统 UI，避免 Dock/菜单栏残留隐藏状态
+            restore_system_ui(app);
+            return Err(format!("创建截图覆盖层失败：{error}"));
+        }
+        if let Some(window) = app.get_webview_window(&label) {
+            raise_window_level(app, &window);
+        }
     }
 
     let state = app.state::<ScreenshotState>();
@@ -217,6 +227,8 @@ pub fn close_session(app: &AppHandle) {
         }
         let _ = std::fs::remove_dir_all(&session.temp_dir);
     }
+    // 无论会话是否存在都恢复系统 UI，防止 Dock/菜单栏残留隐藏
+    restore_system_ui(app);
 }
 
 pub fn show_main_window(app: &AppHandle) {
@@ -227,6 +239,43 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// 将窗口原生层级提升到状态栏级别（25），高于 Dock（20），
+/// 避免贴图/覆盖窗口被 Dock 遮挡。
+/// NSWindow 操作必须在主线程执行，因此通过 run_on_main_thread 派发。
+fn raise_window_level(app: &AppHandle, window: &tauri::WebviewWindow) {
+    use objc2::msg_send;
+
+    const NS_STATUS_WINDOW_LEVEL: i64 = 25;
+    let Ok(ns_window) = window.ns_window() else {
+        return;
+    };
+    // 裸指针不可跨线程传递，改传地址值；窗口在派发执行期间由会话持有不会被释放
+    let handle_addr = ns_window as usize;
+    if handle_addr == 0 {
+        return;
+    }
+    let _ = app.run_on_main_thread(move || {
+        let handle = handle_addr as *mut objc2::runtime::AnyObject;
+        unsafe {
+            let _: () = msg_send![handle, setLevel: NS_STATUS_WINDOW_LEVEL];
+        }
+    });
+}
+
+/// 截图会话期间隐藏系统 UI（Dock、菜单栏）。主线程执行。
+fn suppress_system_ui(app: &AppHandle) {
+    let _ = app.run_on_main_thread(|| unsafe {
+        capture::SetSystemUIMode(capture::K_UI_MODE_ALL_SUPPRESSED, 0);
+    });
+}
+
+/// 恢复系统 UI 显示。主线程执行。
+fn restore_system_ui(app: &AppHandle) {
+    let _ = app.run_on_main_thread(|| unsafe {
+        capture::SetSystemUIMode(capture::K_UI_MODE_NORMAL, 0);
+    });
 }
 
 /// 清理启动前残留的临时截图/贴图文件
@@ -365,18 +414,24 @@ pub fn pin_screenshot(
     let view_h = (height * shrink).round().max(40.0);
 
     let label = format!("pin-{pin_id}");
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html?mode=pin".into()))
-        .title("")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .skip_taskbar(true)
-        .inner_size(view_w, view_h)
-        .build()
-        .map_err(|e| format!("创建贴图窗口失败：{e}"))?;
+    let build_result =
+        WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html?mode=pin".into()))
+            .title("")
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .skip_taskbar(true)
+            .inner_size(view_w, view_h)
+            .build();
+    if let Err(error) = build_result {
+        return Err(format!("创建贴图窗口失败：{error}"));
+    }
+    if let Some(window) = app.get_webview_window(&label) {
+        raise_window_level(&app, &window);
+    }
 
     state.pins.lock().unwrap().insert(
         pin_id,
