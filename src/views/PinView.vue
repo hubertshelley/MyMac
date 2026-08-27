@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { X } from "@lucide/vue";
+import { ClipboardCopy, X } from "@lucide/vue";
 
 interface PinContext {
   imageUrl: string;
@@ -13,6 +13,11 @@ const context = ref<PinContext | null>(null);
 const src = ref("");
 /** 相对原始逻辑尺寸的显示比例 */
 const zoom = ref(1);
+/** 复制成功提示 */
+const copied = ref(false);
+let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+
+const contextMenu = reactive({ visible: false, x: 0, y: 0 });
 
 let disposed = false;
 
@@ -32,6 +37,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener("keydown", onKeyDown);
+  if (copiedTimer) clearTimeout(copiedTimer);
 });
 
 const displaySize = computed(() => {
@@ -67,6 +73,7 @@ function onWheel(event: WheelEvent) {
 async function close() {
   if (disposed) return;
   disposed = true;
+  contextMenu.visible = false;
   try {
     await invoke("close_pin_window");
   } catch (error) {
@@ -77,7 +84,40 @@ async function close() {
 function onKeyDown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     event.preventDefault();
+    if (contextMenu.visible) {
+      contextMenu.visible = false;
+      return;
+    }
     void close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 右键菜单
+// ---------------------------------------------------------------------------
+
+function onContextMenu(event: MouseEvent) {
+  event.preventDefault();
+  const menuW = 150;
+  const menuH = 84;
+  contextMenu.x = Math.min(event.clientX, window.innerWidth - menuW - 4);
+  contextMenu.y = Math.min(event.clientY, window.innerHeight - menuH - 4);
+  contextMenu.visible = true;
+}
+
+function closeContextMenu() {
+  contextMenu.visible = false;
+}
+
+async function copyToClipboard() {
+  closeContextMenu();
+  try {
+    await invoke("copy_pin_to_clipboard");
+    copied.value = true;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied.value = false), 1500);
+  } catch (error) {
+    console.error("复制贴图失败", error);
   }
 }
 </script>
@@ -89,6 +129,8 @@ function onKeyDown(event: KeyboardEvent) {
     data-tauri-drag-region
     @wheel="onWheel"
     @dblclick="close"
+    @contextmenu="onContextMenu"
+    @mousedown="closeContextMenu"
   >
     <img
       :src="src"
@@ -104,5 +146,37 @@ function onKeyDown(event: KeyboardEvent) {
     >
       <X class="size-3.5" />
     </button>
+
+    <!-- 复制成功提示 -->
+    <div
+      v-if="copied"
+      class="absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-md bg-black/75 px-3 py-1.5 text-xs text-white"
+    >
+      已复制到粘贴板
+    </div>
+
+    <!-- 右键菜单 -->
+    <div
+      v-if="contextMenu.visible"
+      class="absolute z-30 flex flex-col rounded-lg border border-white/10 bg-neutral-900/95 py-1 shadow-xl backdrop-blur"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px`, minWidth: '150px' }"
+      @mousedown.stop
+      @contextmenu.prevent.stop
+    >
+      <button
+        class="flex items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-200 transition-colors hover:bg-white/10"
+        @click="copyToClipboard"
+      >
+        <ClipboardCopy class="size-3.5" />
+        复制到粘贴板
+      </button>
+      <button
+        class="flex items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-200 transition-colors hover:bg-white/10"
+        @click="close"
+      >
+        <X class="size-3.5" />
+        关闭贴图
+      </button>
+    </div>
   </div>
 </template>

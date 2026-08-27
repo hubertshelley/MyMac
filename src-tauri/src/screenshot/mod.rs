@@ -521,10 +521,37 @@ pub fn pin_screenshot(
     Ok(label)
 }
 
+/// 复制当前贴图到系统剪贴板
+#[tauri::command]
+pub fn copy_pin_to_clipboard(
+    window: tauri::WebviewWindow,
+    state: State<'_, PinState>,
+) -> Result<(), String> {
+    let label = window.label();
+    let pin_id = label.strip_prefix("pin-").ok_or("无效的贴图窗口标识")?;
+    let file = {
+        let guard = state.pins.lock().unwrap();
+        guard.get(pin_id).map(|meta| meta.file.clone())
+    };
+    let Some(file) = file else {
+        return Err("贴图数据不存在".to_string());
+    };
+    let png = std::fs::read(&file).map_err(|e| format!("读取贴图失败：{e}"))?;
+    let dynamic = image::load_from_memory(&png).map_err(|e| format!("图片解码失败：{e}"))?;
+    let rgba = dynamic.to_rgba8();
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+        })
+        .map_err(|e| format!("写入剪贴板失败：{e}"))
+}
+
 /// 贴图窗口初始化上下文
 #[derive(Serialize)]
-pub struct PinContext {
-    #[serde(rename = "imageUrl")]
+pub struct PinContext {    #[serde(rename = "imageUrl")]
     image_url: String,
     width: f64,
     height: f64,
