@@ -96,21 +96,26 @@ const currentView = computed(() => {
     <!-- 屏幕录制权限提示 -->
     <div
       v-if="permissionTipVisible"
-      class="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-popover px-4 py-3 shadow-lg"
+      class="absolute bottom-6 left-1/2 z-50 flex max-w-xl -translate-x-1/2 flex-col gap-2 rounded-lg border border-border bg-popover px-4 py-3 shadow-lg"
     >
-      <span class="text-sm">截图功能需要「屏幕录制」权限，请在系统设置中允许 MyMac。</span>
-      <button
-        class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90"
-        @click="openScreenSettings"
-      >
-        打开设置
-      </button>
-      <button
-        class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent"
-        @click="permissionTipVisible = false"
-      >
-        稍后
-      </button>
+      <span class="text-sm">
+        截图功能需要「屏幕录制」权限：请在系统设置中允许 MyMac，然后
+        <b>完全退出并重新打开 MyMac</b>（状态栏图标 → 退出 MyMac）才会生效。
+      </span>
+      <div class="flex items-center gap-2">
+        <button
+          class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90"
+          @click="openScreenSettings"
+        >
+          打开设置
+        </button>
+        <button
+          class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent"
+          @click="permissionTipVisible = false"
+        >
+          稍后
+        </button>
+      </div>
     </div>
   </div>
 </template>
