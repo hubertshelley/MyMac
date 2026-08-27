@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { ArrowUpRight, Copy, Download, Pin, Square, Type, Undo2, X } from "@lucide/vue";
 
 interface OverlayDisplay {
@@ -117,7 +117,9 @@ onMounted(async () => {
     );
     display.value = context.display;
     windows.value = context.windows;
-    bgSrc.value = convertFileSrc(context.display.imageUrl);
+    // 数据 URL 加载的图片不会污染 canvas，导出时 toBlob 才不会被安全策略拦截
+    const background = await invoke<string>("get_capture_background");
+    bgSrc.value = `data:image/png;base64,${background}`;
     ready.value = true;
     await nextTick();
     render();
@@ -622,6 +624,9 @@ async function exportBase64(): Promise<string> {
   const sel = selection.value;
   const img = bgImage.value;
   if (!sel || !img) throw new Error("没有可导出的内容");
+  if (!img.complete || img.naturalWidth === 0) {
+    throw new Error("背景图尚未加载完成，请稍候再试");
+  }
   const scale = display.value.scale;
   const outW = Math.max(1, Math.round(sel.w * scale));
   const outH = Math.max(1, Math.round(sel.h * scale));

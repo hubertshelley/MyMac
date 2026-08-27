@@ -310,6 +310,29 @@ pub fn cancel_screenshot(app: AppHandle) {
     close_session(&app);
 }
 
+/// 返回当前覆盖层背景图的 base64 PNG 数据。
+/// 经数据 URL 加载的图片不会污染 canvas，前端导出时才能正常调用 toBlob。
+#[tauri::command]
+pub fn get_capture_background(
+    window: tauri::WebviewWindow,
+    state: State<'_, ScreenshotState>,
+) -> Result<String, String> {
+    let label = window.label();
+    let index: usize = label
+        .rsplit('-')
+        .next()
+        .and_then(|part| part.parse().ok())
+        .ok_or_else(|| "无效的覆盖窗口标识".to_string())?;
+    let guard = state.session.lock().unwrap();
+    let session = guard.as_ref().ok_or_else(|| "截图会话不存在".to_string())?;
+    let display = session
+        .displays
+        .get(index)
+        .ok_or_else(|| "覆盖窗口索引越界".to_string())?;
+    let bytes = std::fs::read(&display.image_url).map_err(|e| format!("读取背景图失败：{e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// 完成输出后关闭会话
 #[tauri::command]
 pub fn finish_screenshot(app: AppHandle) {

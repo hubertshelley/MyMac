@@ -376,6 +376,7 @@ pub fn run() {
             totp::capture_totp_qr,
             totp::decode_totp_qr_clipboard,
             screenshot::get_capture_context,
+            screenshot::get_capture_background,
             screenshot::cancel_screenshot,
             screenshot::finish_screenshot,
             screenshot::copy_screenshot_to_clipboard,
