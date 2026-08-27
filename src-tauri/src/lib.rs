@@ -191,6 +191,7 @@ pub fn run() {
                 eprintln!("注册全局快捷键 F1 失败：{error}");
             }
 
+
             // 关闭主窗口时隐藏窗口与 Dock 图标，状态栏继续常驻
             if let Some(window) = app.get_webview_window("main") {
                 let window_for_close = window.clone();

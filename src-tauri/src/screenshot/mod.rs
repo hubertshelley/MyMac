@@ -26,7 +26,7 @@ pub struct OverlayDisplay {
     pub width: f64,
     pub height: f64,
     pub scale: f64,
-    /// 冻结背景图文件名（前端经 asset 协议加载）
+    /// 冻结背景图的完整本地路径（前端经 asset 协议加载）
     #[serde(rename = "imageUrl")]
     pub image_url: String,
 }
@@ -148,9 +148,6 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
 
     let grabbed = grab_displays_on_main(app, &displays)?;
 
-    // 抓屏完成后隐藏 Dock 与菜单栏，避免遮挡覆盖层与工具栏
-    suppress_system_ui(app);
-
     let mut overlays = Vec::with_capacity(displays.len());
     for display in &displays {
         let png_bytes = grabbed
@@ -159,8 +156,8 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
             .map(|(_, png)| png)
             .ok_or_else(|| format!("显示器 {} 抓屏结果缺失", display.id))?;
         let file_name = format!("display_{}.png", display.id);
-        std::fs::write(temp_dir.join(&file_name), png_bytes)
-            .map_err(|e| format!("写入背景图失败：{e}"))?;
+        let file_path = temp_dir.join(&file_name);
+        std::fs::write(&file_path, png_bytes).map_err(|e| format!("写入背景图失败：{e}"))?;
         overlays.push(OverlayDisplay {
             display_id: display.id,
             x: display.x,
@@ -168,7 +165,8 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
             width: display.width,
             height: display.height,
             scale: display.scale,
-            image_url: file_name,
+            // 必须是完整路径，前端经 asset 协议加载
+            image_url: file_path.to_string_lossy().into_owned(),
         });
     }
 
@@ -194,8 +192,6 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         .focused(index == 0)
         .build();
         if let Err(error) = build_result {
-            // 建窗失败时恢复系统 UI，避免 Dock/菜单栏残留隐藏状态
-            restore_system_ui(app);
             return Err(format!("创建截图覆盖层失败：{error}"));
         }
         if let Some(window) = app.get_webview_window(&label) {
@@ -227,8 +223,6 @@ pub fn close_session(app: &AppHandle) {
         }
         let _ = std::fs::remove_dir_all(&session.temp_dir);
     }
-    // 无论会话是否存在都恢复系统 UI，防止 Dock/菜单栏残留隐藏
-    restore_system_ui(app);
 }
 
 pub fn show_main_window(app: &AppHandle) {
@@ -241,8 +235,8 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// 将窗口原生层级提升到状态栏级别（25），高于 Dock（20），
-/// 避免贴图/覆盖窗口被 Dock 遮挡。
+/// 将窗口原生层级提升到状态栏级别（25），高于 Dock（20）与菜单栏（24），
+/// 覆盖层与贴图窗口因此不会被遮挡，也无需改动系统 UI 状态。
 /// NSWindow 操作必须在主线程执行，因此通过 run_on_main_thread 派发。
 fn raise_window_level(app: &AppHandle, window: &tauri::WebviewWindow) {
     use objc2::msg_send;
@@ -261,20 +255,6 @@ fn raise_window_level(app: &AppHandle, window: &tauri::WebviewWindow) {
         unsafe {
             let _: () = msg_send![handle, setLevel: NS_STATUS_WINDOW_LEVEL];
         }
-    });
-}
-
-/// 截图会话期间隐藏系统 UI（Dock、菜单栏）。主线程执行。
-fn suppress_system_ui(app: &AppHandle) {
-    let _ = app.run_on_main_thread(|| unsafe {
-        capture::SetSystemUIMode(capture::K_UI_MODE_ALL_SUPPRESSED, 0);
-    });
-}
-
-/// 恢复系统 UI 显示。主线程执行。
-fn restore_system_ui(app: &AppHandle) {
-    let _ = app.run_on_main_thread(|| unsafe {
-        capture::SetSystemUIMode(capture::K_UI_MODE_NORMAL, 0);
     });
 }
 
