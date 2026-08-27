@@ -383,6 +383,7 @@ pub fn run() {
             screenshot::save_screenshot_to_file,
             screenshot::pin_screenshot,
             screenshot::get_pin_context,
+            screenshot::copy_pin_to_clipboard,
             screenshot::resize_pin_window,
             screenshot::close_pin_window,
             screenshot::open_screen_capture_settings,
