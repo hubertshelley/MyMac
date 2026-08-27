@@ -153,7 +153,12 @@ pub fn start_screenshot(app: &AppHandle) -> Result<(), String> {
     run_screenshot_session(app)
 }
 
-/// 执行截图会话（不含权限检查）
+/// 执行截图会话（不含权限检查）。
+///
+/// 时序设计（为降低呼出延迟）：
+/// 1. 主线程抓取原始画面（系统限制，不可避免）
+/// 2. 立即注册会话并创建覆盖窗口——前端先呈现加载态，用户立刻得到响应
+/// 3. 像素转换与 PNG 编码在后台线程并行执行，写完背景文件后前端自动呈现
 pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
     // 隐藏主窗口，等待隐藏动画结束再抓屏，避免截入自身
     // （主窗口本就隐藏时无需等待，这是最常见的托盘场景）
@@ -176,8 +181,6 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         return Err("未找到可用显示器".to_string());
     }
 
-    // 抓取每块屏幕的冻结背景（CGDisplayCreateImage 必须在主线程调用，
-    // 否则可能挂起）
     let session_id = scru128::new_string();
     let temp_dir = app
         .path()
@@ -187,19 +190,13 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         .join(&session_id);
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
 
+    // 1. 主线程抓取原始画面数据
     let raw_grabs = grab_displays_on_main(app, &displays)?;
-    let grabbed = encode_grabs_parallel(raw_grabs)?;
 
+    // 2. 先注册会话（背景文件由后台线程异步写出）
     let mut overlays = Vec::with_capacity(displays.len());
     for display in &displays {
-        let png_bytes = grabbed
-            .iter()
-            .find(|(id, _)| *id == display.id)
-            .map(|(_, png)| png)
-            .ok_or_else(|| format!("显示器 {} 抓屏结果缺失", display.id))?;
-        let file_name = format!("display_{}.png", display.id);
-        let file_path = temp_dir.join(&file_name);
-        std::fs::write(&file_path, png_bytes).map_err(|e| format!("写入背景图失败：{e}"))?;
+        let file_path = temp_dir.join(format!("display_{}.png", display.id));
         overlays.push(OverlayDisplay {
             display_id: display.id,
             x: display.x,
@@ -211,8 +208,16 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
             image_url: file_path.to_string_lossy().into_owned(),
         });
     }
+    {
+        let state = app.state::<ScreenshotState>();
+        *state.session.lock().unwrap() = Some(CaptureSession {
+            id: session_id.clone(),
+            displays: overlays.clone(),
+            temp_dir: temp_dir.clone(),
+        });
+    }
 
-    // 为每块屏幕创建覆盖窗口
+    // 3. 立即创建覆盖窗口（前端显示加载态，背景就绪后自动呈现）
     for (index, overlay) in overlays.iter().enumerate() {
         let label = format!("screenshot-{session_id}-{index}");
         let build_result = WebviewWindowBuilder::new(
@@ -234,6 +239,7 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         .focused(index == 0)
         .build();
         if let Err(error) = build_result {
+            close_session(app);
             return Err(format!("创建截图覆盖层失败：{error}"));
         }
         if let Some(window) = app.get_webview_window(&label) {
@@ -241,12 +247,32 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    let state = app.state::<ScreenshotState>();
-    *state.session.lock().unwrap() = Some(CaptureSession {
-        id: session_id,
-        displays: overlays,
-        temp_dir,
+    // 4. 后台线程并行转换编码并写出背景文件
+    let encode_app = app.clone();
+    let encode_overlays = overlays.clone();
+    std::thread::spawn(move || {
+        let result = encode_grabs_parallel(raw_grabs).and_then(|encoded| {
+            for (display_id, png) in encoded {
+                let path = encode_overlays
+                    .iter()
+                    .find(|o| o.display_id == display_id)
+                    .map(|o| o.image_url.clone())
+                    .ok_or_else(|| format!("显示器 {} 缺少背景路径", display_id))?;
+                std::fs::write(&path, png).map_err(|e| format!("写入背景图失败：{e}"))?;
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                let _ = encode_app.emit("screenshot-background-ready", ());
+            }
+            Err(error) => {
+                eprintln!("截图背景编码失败：{error}");
+                let _ = encode_app.emit("screenshot-background-failed", error);
+            }
+        }
     });
+
     Ok(())
 }
 
@@ -459,6 +485,17 @@ pub fn pin_screenshot(
     let view_h = (height * shrink).round().max(40.0);
 
     let label = format!("pin-{pin_id}");
+
+    // 先注册元数据再创建窗口：窗口加载后会立即请求上下文，避免竞态
+    state.pins.lock().unwrap().insert(
+        pin_id.clone(),
+        PinMeta {
+            file: file.clone(),
+            width,
+            height,
+        },
+    );
+
     let build_result =
         WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html?mode=pin".into()))
             .title("")
@@ -472,20 +509,15 @@ pub fn pin_screenshot(
             .inner_size(view_w, view_h)
             .build();
     if let Err(error) = build_result {
+        // 建窗失败时回收元数据与文件
+        state.pins.lock().unwrap().remove(&pin_id);
+        let _ = std::fs::remove_file(pins_dir.join(format!("{pin_id}.png")));
         return Err(format!("创建贴图窗口失败：{error}"));
     }
     if let Some(window) = app.get_webview_window(&label) {
         raise_window_level(&app, &window);
     }
 
-    state.pins.lock().unwrap().insert(
-        pin_id,
-        PinMeta {
-            file,
-            width,
-            height,
-        },
-    );
     Ok(label)
 }
 
