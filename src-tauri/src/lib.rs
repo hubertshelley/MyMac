@@ -10,17 +10,35 @@ mod brew;
 mod clipboard;
 mod config;
 mod launch;
+pub mod screenshot;
 mod status;
 mod system;
 mod totp;
 
 use clipboard::ClipboardState;
 use system::{AppState, SystemMonitor};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // 全局快捷键（F1）呼出截图
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            if let Err(error) = screenshot::start_screenshot(&app) {
+                                eprintln!("启动截图失败：{error}");
+                            }
+                        });
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             let monitor = Arc::new(Mutex::new(SystemMonitor::new()));
             let config = Arc::new(Mutex::new(config::load_config()));
@@ -48,6 +66,8 @@ pub fn run() {
             let mem_item = MenuItem::with_id(app, "mem", "内存：--", false, None::<&str>)?;
             let net_item = MenuItem::with_id(app, "net", "网络：--", false, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "打开主面板", true, None::<&str>)?;
+            let screenshot_item =
+                MenuItem::with_id(app, "screenshot", "截图（F1）", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 MyMac", true, None::<&str>)?;
 
             // 粘贴板历史子菜单（动态刷新最近记录）
@@ -68,6 +88,7 @@ pub fn run() {
                     &clip_submenu,
                     &totp_submenu,
                     &PredefinedMenuItem::separator(app)?,
+                    &screenshot_item,
                     &show_item,
                     &quit_item,
                 ],
@@ -82,6 +103,14 @@ pub fn run() {
                     let clip_submenu = clip_submenu.clone();
                     move |app, event| match event.id.as_ref() {
                         "show" => show_main_window(app),
+                        "screenshot" => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Err(error) = screenshot::start_screenshot(&app) {
+                                    eprintln!("启动截图失败：{error}");
+                                }
+                            });
+                        }
                         "manage-totp" => {
                             show_main_window(app);
                             let _ = app.emit("navigate-to", "totp");
@@ -153,6 +182,14 @@ pub fn run() {
             });
             app.manage(clip_state);
             app.manage(totp_state);
+            app.manage(screenshot::ScreenshotState::default());
+            app.manage(screenshot::PinState::default());
+
+            // 清理上次异常退出残留的截图/贴图临时文件，并注册全局快捷键 F1
+            screenshot::cleanup_temp_files(app.handle());
+            if let Err(error) = app.global_shortcut().register("F1") {
+                eprintln!("注册全局快捷键 F1 失败：{error}");
+            }
 
             // 关闭主窗口时隐藏窗口与 Dock 图标，状态栏继续常驻
             if let Some(window) = app.get_webview_window("main") {
@@ -337,6 +374,16 @@ pub fn run() {
             totp::decode_totp_qr_image,
             totp::capture_totp_qr,
             totp::decode_totp_qr_clipboard,
+            screenshot::get_capture_context,
+            screenshot::cancel_screenshot,
+            screenshot::finish_screenshot,
+            screenshot::copy_screenshot_to_clipboard,
+            screenshot::save_screenshot_to_file,
+            screenshot::pin_screenshot,
+            screenshot::get_pin_context,
+            screenshot::resize_pin_window,
+            screenshot::close_pin_window,
+            screenshot::open_screen_capture_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

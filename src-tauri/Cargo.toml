@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api", "protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,10 +37,14 @@ sha1 = "0.10"
 data-encoding = "2.6"
 url = "2.5"
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+core-graphics = "0.25"
+core-foundation = "0.10"
 
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }

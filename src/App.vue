@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Gauge, AppWindow, Rocket, Settings, ClipboardList, KeyRound, Beer } from "@lucide/vue";
 import DashboardView from "@/views/DashboardView.vue";
@@ -15,13 +16,27 @@ type Tab = "dashboard" | "apps" | "launch" | "brew" | "clipboard" | "totp" | "se
 const current = ref<Tab>("dashboard");
 let unlistenNavigation: (() => void) | undefined;
 
+// 屏幕录制权限缺失提示
+const permissionTipVisible = ref(false);
+let unlistenPermission: (() => void) | undefined;
+
+function openScreenSettings() {
+  invoke("open_screen_capture_settings").catch((error) => console.error(error));
+}
+
 onMounted(async () => {
   unlistenNavigation = await listen<string>("navigate-to", (event) => {
     if (event.payload === "totp") current.value = "totp";
   });
+  unlistenPermission = await listen("screenshot-permission-needed", () => {
+    permissionTipVisible.value = true;
+  });
 });
 
-onUnmounted(() => unlistenNavigation?.());
+onUnmounted(() => {
+  unlistenNavigation?.();
+  unlistenPermission?.();
+});
 
 const tabs: { key: Tab; label: string; icon: unknown }[] = [
   { key: "dashboard", label: "资源监控", icon: Gauge },
@@ -77,5 +92,25 @@ const currentView = computed(() => {
     <main class="flex-1 overflow-y-auto p-6">
       <component :is="currentView" />
     </main>
+
+    <!-- 屏幕录制权限提示 -->
+    <div
+      v-if="permissionTipVisible"
+      class="absolute bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-popover px-4 py-3 shadow-lg"
+    >
+      <span class="text-sm">截图功能需要「屏幕录制」权限，请在系统设置中允许 MyMac。</span>
+      <button
+        class="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90"
+        @click="openScreenSettings"
+      >
+        打开设置
+      </button>
+      <button
+        class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent"
+        @click="permissionTipVisible = false"
+      >
+        稍后
+      </button>
+    </div>
   </div>
 </template>
