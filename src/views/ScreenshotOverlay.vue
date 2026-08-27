@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { ArrowUpRight, Copy, Download, Pin, Square, Type, Undo2, X } from "@lucide/vue";
 
 interface OverlayDisplay {
@@ -117,9 +117,7 @@ onMounted(async () => {
     );
     display.value = context.display;
     windows.value = context.windows;
-    // 数据 URL 加载的图片不会污染 canvas，导出时 toBlob 才不会被安全策略拦截
-    const background = await invoke<string>("get_capture_background");
-    bgSrc.value = `data:image/png;base64,${background}`;
+    bgSrc.value = await loadBackground(context.display.imageUrl);
     ready.value = true;
     await nextTick();
     render();
@@ -129,6 +127,23 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeyDown, true);
   window.addEventListener("blur", onWindowBlur);
 });
+
+/**
+ * 加载冻结背景图。
+ * 优先 fetch asset 地址转 blob URL：二进制直传且同源，canvas 不会被污染；
+ * fetch 失败时回退到 base64 数据 URL（同样不污染 canvas）。
+ */
+async function loadBackground(imagePath: string): Promise<string> {
+  try {
+    const response = await fetch(convertFileSrc(imagePath));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+  } catch {
+    const background = await invoke<string>("get_capture_background");
+    return `data:image/png;base64,${background}`;
+  }
+}
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeyDown, true);

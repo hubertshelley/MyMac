@@ -57,23 +57,24 @@ pub struct PinState {
     pins: Mutex<HashMap<String, PinMeta>>,
 }
 
-/// 在主线程抓取所有显示器画面（CGDisplayCreateImage 必须在主线程调用，
-/// 从后台线程调用可能永久挂起）。带 30 秒超时保护。
+/// 在主线程抓取所有显示器的原始画面数据。
+/// CGDisplayCreateImage 必须在主线程调用，从后台线程调用可能永久挂起。
+/// 带 30 秒超时保护。
 fn grab_displays_on_main(
     app: &AppHandle,
     displays: &[capture::DisplayInfo],
-) -> Result<Vec<(u32, Vec<u8>)>, String> {
+) -> Result<Vec<capture::RawGrab>, String> {
     use std::sync::{Arc, Mutex};
 
-    type GrabResult = Arc<Mutex<Option<Result<Vec<(u32, Vec<u8>)>, String>>>>;
+    type GrabResult = Arc<Mutex<Option<Result<Vec<capture::RawGrab>, String>>>>;
     let result: GrabResult = Arc::new(Mutex::new(None));
     let inner = result.clone();
     let displays = displays.to_vec();
     app.run_on_main_thread(move || {
         let mut out = Vec::with_capacity(displays.len());
         for display in &displays {
-            match capture::grab_display_png(display.id) {
-                Ok((png, _, _)) => out.push((display.id, png)),
+            match capture::grab_display_raw(display.id) {
+                Ok(grab) => out.push(grab),
                 Err(error) => {
                     *inner.lock().unwrap() = Some(Err(error));
                     return;
@@ -85,18 +86,50 @@ fn grab_displays_on_main(
     .map_err(|e| format!("派发主线程失败：{e}"))?;
 
     // 轮询等待主线程完成（最长 30 秒）
-    for _ in 0..1500 {
-        {
-            let guard = result.lock().unwrap();
-            match guard.as_ref() {
-                Some(Ok(data)) => return Ok(data.clone()),
-                Some(Err(error)) => return Err(error.clone()),
-                None => {}
-            }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let taken = {
+            let mut guard = result.lock().unwrap();
+            guard.take()
+        };
+        if let Some(outcome) = taken {
+            return outcome;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("屏幕抓取超时".to_string());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    Err("屏幕抓取超时".to_string())
+}
+
+/// 将原始抓屏数据并行转换为 RGBA 并编码 PNG（每屏一个线程）。
+/// PNG 编码是抓屏链路中最耗时的一步，多屏时并行可显著缩短等待。
+fn encode_grabs_parallel(
+    grabs: Vec<capture::RawGrab>,
+) -> Result<Vec<(u32, Vec<u8>)>, String> {
+    use std::sync::mpsc;
+
+    let (sender, receiver) = mpsc::channel();
+    let mut pending = grabs.len();
+    for grab in grabs {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let result = capture::grab_display_png_for_raw(grab);
+            let _ = sender.send(result);
+        });
+    }
+    drop(sender);
+
+    let mut out = Vec::new();
+    for result in receiver {
+        let (id, png) = result?;
+        out.push((id, png));
+        pending -= 1;
+        if pending == 0 {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// 触发一次截图（幂等：已有会话进行中时忽略）
@@ -123,11 +156,19 @@ pub fn start_screenshot(app: &AppHandle) -> Result<(), String> {
 /// 执行截图会话（不含权限检查）
 pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
     // 隐藏主窗口，等待隐藏动画结束再抓屏，避免截入自身
-    if let Some(main) = app.get_webview_window("main") {
+    // （主窗口本就隐藏时无需等待，这是最常见的托盘场景）
+    let hid_main_window = if let Some(main) = app.get_webview_window("main") {
         if main.is_visible().unwrap_or(false) {
             let _ = main.hide();
-            std::thread::sleep(Duration::from_millis(250));
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
+    if hid_main_window {
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     let displays = capture::active_displays();
@@ -146,7 +187,8 @@ pub fn run_screenshot_session(app: &AppHandle) -> Result<(), String> {
         .join(&session_id);
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
 
-    let grabbed = grab_displays_on_main(app, &displays)?;
+    let raw_grabs = grab_displays_on_main(app, &displays)?;
+    let grabbed = encode_grabs_parallel(raw_grabs)?;
 
     let mut overlays = Vec::with_capacity(displays.len());
     for display in &displays {

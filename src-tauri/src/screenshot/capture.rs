@@ -75,6 +75,25 @@ fn display_scale(display_id: u32, logical_width: f64) -> f64 {
 
 /// 抓取指定显示器完整画面并编码为 PNG，返回 (PNG 字节, 物理宽, 物理高)
 pub fn grab_display_png(display_id: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let grab = grab_display_raw(display_id)?;
+    let rgba = bgra_to_rgba(&grab.raw, grab.width, grab.height, grab.bytes_per_row)?;
+    let png = encode_png(rgba, grab.width, grab.height)?;
+    Ok((png, grab.width as u32, grab.height as u32))
+}
+
+/// 抓屏的原始结果：未解码的 BGRA 数据与几何信息。
+/// 抓取（CGDisplayCreateImage）必须在主线程执行，
+/// 后续的像素转换与 PNG 编码可移至后台线程并行处理。
+pub struct RawGrab {
+    pub display_id: u32,
+    pub raw: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub bytes_per_row: usize,
+}
+
+/// 抓取指定显示器的原始画面数据（仅可在主线程调用）
+pub fn grab_display_raw(display_id: u32) -> Result<RawGrab, String> {
     let display = CGDisplay::new(display_id);
     let cg_image = display
         .image()
@@ -90,16 +109,43 @@ pub fn grab_display_png(display_id: u32) -> Result<(Vec<u8>, u32, u32), String> 
         ));
     }
     let image_data = cg_image.data();
-    let raw = image_data.bytes();
-    let rgba = bgra_to_rgba(raw, width, height, bytes_per_row)?;
+    let raw = image_data.bytes().to_vec();
+    Ok(RawGrab {
+        display_id,
+        raw,
+        width,
+        height,
+        bytes_per_row,
+    })
+}
 
-    let frame = image::RgbaImage::from_raw(width as u32, height as u32, rgba)
-        .ok_or_else(|| "图像缓冲无效".to_string())?;
+/// 将 RGBA 像素编码为 PNG（快速压缩档，显著降低编码耗时）
+pub fn encode_png(rgba: Vec<u8>, width: usize, height: usize) -> Result<Vec<u8>, String> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    use image::ImageEncoder;
+
     let mut cursor = std::io::Cursor::new(Vec::new());
-    frame
-        .write_to(&mut cursor, image::ImageFormat::Png)
+    let encoder = PngEncoder::new_with_quality(
+        &mut cursor,
+        CompressionType::Fast,
+        FilterType::NoFilter,
+    );
+    encoder
+        .write_image(
+            &rgba,
+            width as u32,
+            height as u32,
+            image::ExtendedColorType::Rgba8,
+        )
         .map_err(|e| format!("PNG 编码失败：{e}"))?;
-    Ok((cursor.into_inner(), width as u32, height as u32))
+    Ok(cursor.into_inner())
+}
+
+/// 从原始抓屏数据转换并编码 PNG（供后台线程调用）
+pub fn grab_display_png_for_raw(grab: RawGrab) -> Result<(u32, Vec<u8>), String> {
+    let rgba = bgra_to_rgba(&grab.raw, grab.width, grab.height, grab.bytes_per_row)?;
+    let png = encode_png(rgba, grab.width, grab.height)?;
+    Ok((grab.display_id, png))
 }
 
 /// 将 CoreGraphics 的 BGRA 像素数据转换为 RGBA。
