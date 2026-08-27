@@ -147,7 +147,9 @@ pub fn start_screenshot(app: &AppHandle) -> Result<(), String> {
         capture::request_screen_capture_access();
         show_main_window(app);
         let _ = app.emit("screenshot-permission-needed", ());
-        return Err("缺少屏幕录制权限，请在系统设置中允许 MyMac 录制屏幕".to_string());
+        return Err(
+            "缺少屏幕录制权限：请在系统设置中允许 MyMac 后，完全退出并重新打开应用".to_string(),
+        );
     }
 
     run_screenshot_session(app)
