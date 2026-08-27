@@ -77,6 +77,8 @@ let tipTimer: ReturnType<typeof setTimeout> | undefined;
 const bgImage = ref<HTMLImageElement | null>(null);
 const bgSrc = ref("");
 const canvasEl = ref<HTMLCanvasElement | null>(null);
+const toolbarEl = ref<HTMLDivElement | null>(null);
+const toolbarSize = reactive({ width: 460, height: 46 });
 
 const textInput = reactive({
   active: false,
@@ -389,6 +391,16 @@ function enterEdit() {
   activeTool.value = "none";
   shapes.value = [];
   render();
+  // 工具栏渲染后测量实际尺寸，用于定位夹取
+  nextTick(measureToolbar);
+}
+
+function measureToolbar() {
+  const el = toolbarEl.value;
+  if (el) {
+    toolbarSize.width = el.offsetWidth || toolbarSize.width;
+    toolbarSize.height = el.offsetHeight || toolbarSize.height;
+  }
 }
 
 function updateCursor(px: number, py: number) {
@@ -422,6 +434,7 @@ function openTextInput(px: number, py: number) {
 function commitTextInput() {
   const value = textInput.value.trim();
   textInput.active = false;
+  textInput.value = "";
   if (value && selection.value) {
     shapes.value.push({
       kind: "text",
@@ -709,19 +722,18 @@ function showTip(message: string) {
 // 工具栏布局
 // ---------------------------------------------------------------------------
 
-const TOOLBAR_WIDTH = 396;
-const TOOLBAR_HEIGHT = 46;
-
 const toolbarStyle = computed(() => {
   const sel = selection.value;
   if (!sel) return { display: "none" };
+  const tbW = toolbarSize.width;
+  const tbH = toolbarSize.height;
   let top = sel.y + sel.h + 12;
-  if (top + TOOLBAR_HEIGHT > display.value.height - 8) {
-    top = sel.y - TOOLBAR_HEIGHT - 12;
+  if (top + tbH > display.value.height - 8) {
+    top = sel.y - tbH - 12;
   }
   if (top < 8) top = 8;
-  let left = sel.x + sel.w - TOOLBAR_WIDTH;
-  left = Math.max(8, Math.min(left, display.value.width - TOOLBAR_WIDTH - 8));
+  let left = sel.x + sel.w - tbW;
+  left = Math.max(8, Math.min(left, display.value.width - tbW - 8));
   return { top: `${Math.round(top)}px`, left: `${Math.round(left)}px` };
 });
 
@@ -771,6 +783,7 @@ const textStyle = computed(() => {
       :style="textStyle"
       class="absolute z-20 border-b border-dashed border-white/70 bg-transparent outline-none"
       placeholder="输入文字…"
+      @mousedown.stop
       @keydown.enter.prevent="commitTextInput"
       @blur="commitTextInput"
     />
@@ -778,8 +791,12 @@ const textStyle = computed(() => {
     <!-- 工具栏 -->
     <div
       v-if="phase === 'edit'"
+      ref="toolbarEl"
       :style="toolbarStyle"
       class="absolute z-10 flex items-center gap-1 rounded-lg border border-white/10 bg-neutral-900/90 px-2 py-1.5 shadow-xl backdrop-blur"
+      @mousedown.stop
+      @mousemove.stop
+      @mouseup.stop
     >
       <!-- 标注工具 -->
       <button
