@@ -50,7 +50,6 @@ const COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#ffffff", "#111111"
 const WIDTHS = [2, 4, 6];
 const FONT_SIZES = [14, 18, 24];
 const HANDLE_SIZE = 16;
-
 const display = ref<OverlayDisplay>({
   displayId: 0,
   x: 0,
@@ -69,6 +68,7 @@ const selection = ref<Selection | null>(null);
 const activeTool = ref<ToolKind>("none");
 const color = ref(COLORS[0]);
 const strokeWidth = ref(2);
+const fontSize = ref(18);
 const shapes = ref<Shape[]>([]);
 const drawingShape = ref<Shape | null>(null);
 const tip = ref("");
@@ -231,6 +231,8 @@ function onMouseDown(event: MouseEvent) {
   // 编辑态
   if (activeTool.value === "text") {
     if (selection.value && contains(selection.value, px, py)) {
+      // 阻止 mousedown 的默认焦点转移，否则输入框刚聚焦就被夺走
+      event.preventDefault();
       openTextInput(px, py);
     }
     return;
@@ -246,7 +248,7 @@ function onMouseDown(event: MouseEvent) {
         y2: py - selection.value.y,
         color: color.value,
         lineWidth: strokeWidth.value,
-        fontSize: fontSizeForWidth(),
+        fontSize: fontSize.value,
       };
       render();
       return;
@@ -444,16 +446,11 @@ function commitTextInput() {
       y2: textInput.y,
       color: color.value,
       lineWidth: strokeWidth.value,
-      fontSize: fontSizeForWidth(),
+      fontSize: fontSize.value,
       text: value,
     });
     render();
   }
-}
-
-function fontSizeForWidth(): number {
-  const index = WIDTHS.indexOf(strokeWidth.value);
-  return FONT_SIZES[index >= 0 ? index : 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -740,12 +737,11 @@ const toolbarStyle = computed(() => {
 const textStyle = computed(() => {
   const sel = selection.value;
   if (!sel) return {};
-  const size = fontSizeForWidth();
   return {
     left: `${textInput.x + sel.x}px`,
     top: `${textInput.y + sel.y - 2}px`,
     color: color.value,
-    font: `${size}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`,
+    font: `${fontSize.value}px -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`,
     minWidth: "60px",
   };
 });
@@ -839,22 +835,38 @@ const textStyle = computed(() => {
 
       <div class="mx-1 h-5 w-px bg-white/15"></div>
 
-      <!-- 粗细 -->
-      <button
-        v-for="width in WIDTHS"
-        :key="width"
-        :title="`粗细 ${width}`"
-        :class="[
-          'flex h-6 w-7 items-center justify-center rounded-md transition-colors',
-          strokeWidth === width ? 'bg-white/20' : 'hover:bg-white/10',
-        ]"
-        @click="strokeWidth = width"
-      >
-        <span
-          class="rounded-full bg-white"
-          :style="{ width: `${width * 3 + 2}px`, height: `${width}px` }"
-        ></span>
-      </button>
+      <!-- 文本工具时调节字号，其他工具调节线条粗细 -->
+      <template v-if="activeTool === 'text'">
+        <button
+          v-for="size in FONT_SIZES"
+          :key="size"
+          :title="`字号 ${size}`"
+          :class="[
+            'flex h-6 w-7 items-center justify-center rounded-md text-[10px] transition-colors',
+            fontSize === size ? 'bg-white/20 text-white' : 'text-neutral-300 hover:bg-white/10',
+          ]"
+          @click="fontSize = size"
+        >
+          {{ size }}
+        </button>
+      </template>
+      <template v-else>
+        <button
+          v-for="width in WIDTHS"
+          :key="width"
+          :title="`粗细 ${width}`"
+          :class="[
+            'flex h-6 w-7 items-center justify-center rounded-md transition-colors',
+            strokeWidth === width ? 'bg-white/20' : 'hover:bg-white/10',
+          ]"
+          @click="strokeWidth = width"
+        >
+          <span
+            class="rounded-full bg-white"
+            :style="{ width: `${width * 3 + 2}px`, height: `${width}px` }"
+          ></span>
+        </button>
+      </template>
 
       <div class="mx-1 h-5 w-px bg-white/15"></div>
 
