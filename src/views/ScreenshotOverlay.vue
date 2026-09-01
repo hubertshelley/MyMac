@@ -662,18 +662,32 @@ async function exportBase64(): Promise<string> {
   if (!img.complete || img.naturalWidth === 0) {
     throw new Error("背景图尚未加载完成，请稍候再试");
   }
-  const scale = display.value.scale;
-  const outW = Math.max(1, Math.round(sel.w * scale));
-  const outH = Math.max(1, Math.round(sel.h * scale));
+  // 使用实际图片像素与覆盖层逻辑尺寸计算比例，避免系统缩放比取整造成偏差
+  const scaleX = img.naturalWidth / display.value.width;
+  const scaleY = img.naturalHeight / display.value.height;
+  const outW = Math.max(1, Math.round(sel.w * scaleX));
+  const outH = Math.max(1, Math.round(sel.h * scaleY));
   const canvas = document.createElement("canvas");
   canvas.width = outW;
   canvas.height = outH;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("无法创建导出画布");
-  ctx.drawImage(img, sel.x * scale, sel.y * scale, sel.w * scale, sel.h * scale, 0, 0, outW, outH);
-  ctx.scale(scale, scale);
+  ctx.drawImage(
+    img,
+    sel.x * scaleX,
+    sel.y * scaleY,
+    sel.w * scaleX,
+    sel.h * scaleY,
+    0,
+    0,
+    outW,
+    outH,
+  );
+  // 标注坐标在创建时已经相对选区左上角保存，导出时直接从 (0, 0) 绘制；
+  // 不能再次减去选区坐标，否则所有标注都会整体向左上偏移。
+  ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
   for (const shape of shapes.value) {
-    drawShape(ctx, shape, -sel.x, -sel.y);
+    drawShape(ctx, shape, 0, 0);
   }
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((item) => (item ? resolve(item) : reject(new Error("图片编码失败"))), "image/png");
