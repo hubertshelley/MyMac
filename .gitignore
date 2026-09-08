@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# 本地 Cargo 临时缓存（工具构建用）
+.cargo-home/
+.cargo-target/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

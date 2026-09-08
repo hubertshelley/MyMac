@@ -10,6 +10,7 @@ mod brew;
 mod clipboard;
 mod config;
 mod launch;
+mod ocr;
 pub mod screenshot;
 mod status;
 mod system;
@@ -387,6 +388,8 @@ pub fn run() {
             screenshot::resize_pin_window,
             screenshot::close_pin_window,
             screenshot::open_screen_capture_settings,
+            ocr::ocr_recognize,
+            ocr::ocr_copy_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

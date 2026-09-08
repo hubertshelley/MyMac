@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { ArrowUpRight, Copy, Download, Pin, Square, Type, Undo2, X } from "@lucide/vue";
+import { ArrowUpRight, Check, Copy, Download, LoaderCircle, Pin, ScanText, Square, Type, Undo2, X } from "@lucide/vue";
 
 interface OverlayDisplay {
   displayId: number;
@@ -46,6 +46,16 @@ interface Shape {
   text?: string;
 }
 
+interface OcrLine {
+  text: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+}
+
+interface OcrResult {
+  lines: OcrLine[];
+}
+
 const COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#ffffff", "#111111"];
 const WIDTHS = [2, 4, 6];
 const FONT_SIZES = [14, 18, 24];
@@ -75,6 +85,16 @@ const fontSize = ref(18);
 const shapes = ref<Shape[]>([]);
 const drawingShape = ref<Shape | null>(null);
 const tip = ref("");
+const ocrLoading = ref(false);
+const ocrLines = ref<OcrLine[]>([]);
+/** 是否处于 OCR 查看模式（左侧缩放图片 + 右侧面板） */
+const ocrMode = ref(false);
+/** 悬停的识别行索引（原图识别框 / 面板联动） */
+const ocrHoverIndex = ref<number | null>(null);
+/** 选中的识别行索引集合（支持多选联合复制） */
+const ocrSelected = ref<Set<number>>(new Set());
+/** OCR 面板固定宽度 */
+const OCR_PANEL_WIDTH = 320;
 let tipTimer: ReturnType<typeof setTimeout> | undefined;
 
 const bgImage = ref<HTMLImageElement | null>(null);
@@ -251,6 +271,13 @@ function onMouseDown(event: MouseEvent) {
   const px = event.clientX;
   const py = event.clientY;
 
+  // OCR 查看模式：点击识别框选中对应行，不触发拖拽
+  if (ocrMode.value) {
+    const idx = hitOcrBox(px, py);
+    if (idx !== null) toggleOcrSelect(idx);
+    return;
+  }
+
   // 正在输入文本时，点击输入框以外提交
   if (textInput.active) {
     commitTextInput();
@@ -315,6 +342,16 @@ function onMouseMove(event: MouseEvent) {
   if (!backgroundReady.value) return;
   const px = event.clientX;
   const py = event.clientY;
+
+  // OCR 查看模式：检测识别框悬停，联动高亮右侧面板
+  if (ocrMode.value) {
+    const idx = hitOcrBox(px, py);
+    if (idx !== ocrHoverIndex.value) {
+      ocrHoverIndex.value = idx;
+      render();
+    }
+    return;
+  }
 
   // 正在绘制标注：更新终点
   if (drawingShape.value && selection.value) {
@@ -552,6 +589,12 @@ function render() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
 
+  // OCR 查看模式：左侧绘制缩放图片 + 识别框
+  if (ocrMode.value) {
+    renderOcrMode(ctx);
+    return;
+  }
+
   // 半透明遮罩
   ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
   ctx.fillRect(0, 0, cssW, cssH);
@@ -635,6 +678,44 @@ function render() {
   }
 }
 
+/** OCR 查看模式：左侧绘制缩放后的选区图片与识别框 */
+function renderOcrMode(ctx: CanvasRenderingContext2D) {
+  const sel = selection.value;
+  const img = bgImage.value;
+  const layout = ocrLayout.value;
+  if (!sel || !img || !layout) return;
+
+  // 深色背景衬托图片
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  ctx.fillRect(0, 0, display.value.width, display.value.height);
+
+  // 从冻结背景裁剪选区并缩放到左侧区域
+  const scaleX = img.naturalWidth / display.value.width;
+  const scaleY = img.naturalHeight / display.value.height;
+  ctx.drawImage(
+    img,
+    sel.x * scaleX,
+    sel.y * scaleY,
+    sel.w * scaleX,
+    sel.h * scaleY,
+    layout.imgX,
+    layout.imgY,
+    layout.imgW,
+    layout.imgH,
+  );
+
+  // 绘制识别框
+  for (let i = 0; i < ocrLines.value.length; i++) {
+    const rect = ocrBoxRect(i);
+    if (!rect) continue;
+    const isSelected = ocrSelected.value.has(i);
+    const isHover = ocrHoverIndex.value === i;
+    ctx.strokeStyle = isSelected ? "#22c55e" : isHover ? "#3b82f6" : "rgba(59, 130, 246, 0.35)";
+    ctx.lineWidth = isSelected || isHover ? 2 : 1;
+    ctx.strokeRect(rect.x + 0.5, rect.y + 0.5, rect.w - 1, rect.h - 1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 工具栏动作
 // ---------------------------------------------------------------------------
@@ -655,7 +736,7 @@ function cancelSession() {
   invoke("cancel_screenshot").catch((error) => showTip(`取消失败：${error}`));
 }
 
-async function exportBase64(): Promise<string> {
+async function exportBase64(includeAnnotations = true): Promise<string> {
   const sel = selection.value;
   const img = bgImage.value;
   if (!sel || !img) throw new Error("没有可导出的内容");
@@ -685,9 +766,11 @@ async function exportBase64(): Promise<string> {
   );
   // 标注坐标在创建时已经相对选区左上角保存，导出时直接从 (0, 0) 绘制；
   // 不能再次减去选区坐标，否则所有标注都会整体向左上偏移。
-  ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
-  for (const shape of shapes.value) {
-    drawShape(ctx, shape, 0, 0);
+  if (includeAnnotations) {
+    ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+    for (const shape of shapes.value) {
+      drawShape(ctx, shape, 0, 0);
+    }
   }
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((item) => (item ? resolve(item) : reject(new Error("图片编码失败"))), "image/png");
@@ -735,9 +818,89 @@ function pinToScreen() {
   });
 }
 
+async function recognizeText() {
+  if (ocrLoading.value || !selection.value) return;
+  ocrLoading.value = true;
+  ocrMode.value = false;
+  ocrSelected.value = new Set();
+  ocrHoverIndex.value = null;
+  try {
+    const result = await invoke<OcrResult>("ocr_recognize", { data: await exportBase64(false) });
+    ocrLines.value = result.lines;
+    if (result.lines.length === 0) {
+      showTip("未识别到文字");
+    } else {
+      ocrMode.value = true;
+    }
+    render();
+  } catch (error) {
+    showTip(`文字识别失败：${error}`);
+  } finally {
+    ocrLoading.value = false;
+  }
+}
+
+function allOcrText(): string {
+  return ocrLines.value.map((line) => line.text).join("\n");
+}
+
+/** 切换某行选中状态（多选） */
+function toggleOcrSelect(index: number) {
+  const set = new Set(ocrSelected.value);
+  if (set.has(index)) set.delete(index);
+  else set.add(index);
+  ocrSelected.value = set;
+  render();
+}
+
+/** 复制选中的行（按行顺序拼接） */
+async function copyOcrSelected() {
+  const text = [...ocrSelected.value]
+    .sort((a, b) => a - b)
+    .map((i) => ocrLines.value[i].text)
+    .join("\n");
+  if (!text) {
+    showTip("请先选择要复制的文字");
+    return;
+  }
+  await copyOcrText(text);
+}
+
+/** 关闭 OCR 查看模式，回到编辑态 */
+function closeOcr() {
+  ocrMode.value = false;
+  ocrSelected.value = new Set();
+  ocrHoverIndex.value = null;
+  render();
+}
+
+async function copyOcrText(text: string) {
+  try {
+    await invoke("ocr_copy_text", { text });
+    showTip("文字已复制");
+  } catch (error) {
+    showTip(`复制失败：${error}`);
+  }
+}
+
+async function copyOcrAndFinish() {
+  const text = allOcrText();
+  if (!text) return;
+  try {
+    await invoke("ocr_copy_text", { text });
+    await invoke("finish_screenshot");
+  } catch (error) {
+    showTip(`复制失败：${error}`);
+  }
+}
+
 function onKeyDown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     event.preventDefault();
+    if (ocrMode.value) {
+      closeOcr();
+      return;
+    }
     if (textInput.active) {
       textInput.active = false;
       return;
@@ -799,6 +962,72 @@ const textStyle = computed(() => {
     minWidth: "60px",
   };
 });
+
+// ---------------------------------------------------------------------------
+// OCR 查看模式布局（左侧缩放图片 + 右侧固定宽度面板）
+// ---------------------------------------------------------------------------
+
+/** 计算 OCR 模式下左侧图片与右侧面板的布局 */
+const ocrLayout = computed(() => {
+  const sel = selection.value;
+  if (!sel) return null;
+  const margin = 16;
+  const availW = display.value.width - OCR_PANEL_WIDTH - margin * 3;
+  const availH = display.value.height - margin * 2;
+  const scale = Math.min(1, availW / sel.w, availH / sel.h);
+  const imgW = sel.w * scale;
+  const imgH = sel.h * scale;
+  const imgX = margin;
+  const imgY = (display.value.height - imgH) / 2;
+  return {
+    scale,
+    imgX,
+    imgY,
+    imgW,
+    imgH,
+    panelX: imgX + imgW + margin,
+    panelY: margin,
+    panelW: OCR_PANEL_WIDTH,
+    panelH: display.value.height - margin * 2,
+  };
+});
+
+/** 将某识别行的 bbox 映射为 OCR 模式下左侧图片上的像素矩形 */
+function ocrBoxRect(index: number): { x: number; y: number; w: number; h: number } | null {
+  const layout = ocrLayout.value;
+  const line = ocrLines.value[index];
+  if (!layout || !line) return null;
+  const [bx, by, bw, bh] = line.bbox;
+  return {
+    x: layout.imgX + bx * layout.imgW,
+    y: layout.imgY + (1 - by - bh) * layout.imgH,
+    w: bw * layout.imgW,
+    h: bh * layout.imgH,
+  };
+}
+
+/** 命中检测：返回鼠标所在识别框的索引，未命中返回 null */
+function hitOcrBox(px: number, py: number): number | null {
+  for (let i = 0; i < ocrLines.value.length; i++) {
+    const rect = ocrBoxRect(i);
+    if (rect && px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h) {
+      return i;
+    }
+  }
+  return null;
+}
+
+/** OCR 面板样式 */
+const ocrPanelStyle = computed(() => {
+  const layout = ocrLayout.value;
+  if (!layout) return { display: "none" };
+  return {
+    left: `${Math.round(layout.panelX)}px`,
+    top: `${Math.round(layout.panelY)}px`,
+    width: `${layout.panelW}px`,
+    height: `${layout.panelH}px`,
+  };
+});
 </script>
 
 <template>
@@ -850,7 +1079,7 @@ const textStyle = computed(() => {
 
     <!-- 工具栏 -->
     <div
-      v-if="phase === 'edit'"
+      v-if="phase === 'edit' && !ocrMode"
       ref="toolbarEl"
       :style="toolbarStyle"
       class="absolute z-10 flex items-center gap-1 rounded-lg border border-white/10 bg-neutral-900/90 px-2 py-1.5 shadow-xl backdrop-blur"
@@ -941,6 +1170,15 @@ const textStyle = computed(() => {
       <div class="mx-1 h-5 w-px bg-white/15"></div>
 
       <!-- 输出动作 -->
+      <button
+        title="识别文字"
+        :class="actionClass"
+        :disabled="ocrLoading"
+        @click="recognizeText"
+      >
+        <LoaderCircle v-if="ocrLoading" class="size-4 animate-spin" />
+        <ScanText v-else class="size-4" />
+      </button>
       <button title="贴图置顶" :class="actionClass" @click="pinToScreen">
         <Pin class="size-4" />
       </button>
@@ -953,6 +1191,69 @@ const textStyle = computed(() => {
       <button title="关闭 (Esc)" :class="actionClass" @click="cancelSession">
         <X class="size-4" />
       </button>
+    </div>
+
+    <!-- OCR 查看模式：右侧固定宽度面板 -->
+    <div
+      v-if="ocrMode && ocrLayout"
+      class="absolute z-30 flex flex-col overflow-hidden rounded-xl border border-white/10 bg-neutral-900/95 text-white shadow-2xl backdrop-blur"
+      :style="ocrPanelStyle"
+      @mousedown.stop
+      @mousemove.stop
+      @mouseup.stop
+    >
+      <div class="flex items-center justify-between border-b border-white/10 px-3 py-2.5">
+        <span class="flex items-center gap-1.5 text-sm font-medium">
+          <ScanText class="size-4 text-blue-400" />
+          识别结果
+          <span class="text-xs font-normal text-neutral-400">{{ ocrLines.length }} 行</span>
+        </span>
+        <button title="关闭 (Esc)" :class="actionClass" @click="closeOcr">
+          <X class="size-4" />
+        </button>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto p-2">
+        <div
+          v-for="(line, index) in ocrLines"
+          :key="`${index}-${line.text}`"
+          class="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-sm leading-6 transition-colors"
+          :class="[
+            ocrSelected.has(index)
+              ? 'bg-blue-500/30 ring-1 ring-blue-400/60'
+              : ocrHoverIndex === index
+                ? 'bg-blue-500/20'
+                : 'hover:bg-white/5',
+          ]"
+          :title="`点击选中/取消（识别可信度 ${Math.round(line.confidence * 100)}%）`"
+          @mouseenter="ocrHoverIndex = index"
+          @mouseleave="ocrHoverIndex = null"
+          @click="toggleOcrSelect(index)"
+        >
+          <span class="min-w-0 flex-1 select-text break-words">{{ line.text }}</span>
+          <Check v-if="ocrSelected.has(index)" class="mt-1 size-4 shrink-0 text-green-400" />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-2 border-t border-white/10 px-3 py-2.5">
+        <span class="text-xs text-neutral-400">
+          {{ ocrSelected.size ? `已选 ${ocrSelected.size} 行` : "点击行可多选" }}
+        </span>
+        <div class="flex gap-1.5">
+          <button
+            class="rounded-md px-2.5 py-1 text-xs text-neutral-200 hover:bg-white/10"
+            @click="copyOcrSelected"
+          >
+            复制选中
+          </button>
+          <button
+            class="rounded-md bg-blue-500 px-2.5 py-1 text-xs text-white hover:bg-blue-400"
+            @click="copyOcrAndFinish"
+          >
+            复制并完成
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 错误提示 -->
