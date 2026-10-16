@@ -27,12 +27,16 @@ pub struct MyMacApp {
     appearance: Appearance,
     launch: views::launch::LaunchView,
     apps: views::apps::AppsView,
+    clipboard: views::clipboard::ClipboardView,
+    settings: views::settings::SettingsView,
+    totp: views::totp::TotpView,
     /// 正在退出：此时窗口的关闭请求要放行，不能再当成「关闭 = 隐藏」拦截
     quitting: bool,
 }
 
 impl MyMacApp {
     pub fn new(receiver: Receiver<UiEvent>, sink: UiSink, shared: Shared, tray: Tray) -> Self {
+        let totp = views::totp::TotpView::new(shared.totp.clone(), shared.clipboard.clone());
         Self {
             receiver,
             sink,
@@ -42,6 +46,9 @@ impl MyMacApp {
             appearance: Appearance::default(),
             launch: views::launch::LaunchView::new(),
             apps: views::apps::AppsView::new(),
+            clipboard: views::clipboard::ClipboardView::new(),
+            settings: views::settings::SettingsView::new(),
+            totp,
             quitting: false,
         }
     }
@@ -74,7 +81,10 @@ impl eframe::App for MyMacApp {
                     }
                 }
                 UiEvent::AppSize(info) => self.apps.on_app_size(info),
-                UiEvent::ClipboardChanged => self.tray.rebuild_clip_menu(&self.shared),
+                UiEvent::ClipboardChanged => {
+                    self.tray.rebuild_clip_menu(&self.shared);
+                    self.clipboard.mark_stale();
+                }
                 UiEvent::TotpCopied(result) => {
                     if let Err(error) = result {
                         log::error!("复制 2FA 验证码失败：{error}");
@@ -126,6 +136,9 @@ impl eframe::App for MyMacApp {
                     views::dashboard::show(ui, info.as_ref());
                 }
                 Page::Apps => self.apps.show(ui, &self.sink),
+                Page::Clipboard => self.clipboard.show(ui, &self.shared.clipboard),
+                Page::Settings => self.settings.show(ui, &self.shared),
+                Page::Totp => self.totp.show(ui),
                 Page::Launch => self.launch.show(ui),
                 page => views::placeholder::show(ui, page),
             });

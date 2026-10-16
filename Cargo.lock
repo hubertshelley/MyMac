@@ -2501,6 +2501,7 @@ dependencies = [
  "eframe",
  "env_logger",
  "global-hotkey",
+ "image",
  "log",
  "muda",
  "mymac-core",

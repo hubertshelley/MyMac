@@ -438,6 +438,14 @@ pub fn get_clip_history(state: &ClipboardState) -> Vec<ClipItemView> {
         .collect()
 }
 
+/// 读取图片记录的原图 PNG 字节（界面层转纹理用）。
+pub fn clip_image_png(state: &ClipboardState, id: &str) -> Option<Vec<u8>> {
+    let items = state.items.lock().unwrap();
+    let item = items.iter().find(|i| i.id == id && i.kind == ClipKind::Image)?;
+    let file = item.image_file.as_ref()?;
+    std::fs::read(images_dir().join(file)).ok()
+}
+
 /// 获取图片记录的原图 data URL
 pub fn get_clip_image(state: &ClipboardState, id: String) -> Option<String> {
     let items = state.items.lock().unwrap();
