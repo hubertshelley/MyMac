@@ -59,4 +59,8 @@ fi
 # 重建 .app 会让 LaunchServices 丢失注册，导致 open / desktop_app 按 bundle id 找不到
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true
+
+# 结束正在运行的旧实例：open 对同 bundle id 只会唤出已运行进程，不会启动新二进制。
+# 不先杀掉的话，接下来的 `open` 拉起的是旧进程（看不到本次改动，易误判为"改了没用"）。
+killall MyMac 2>/dev/null && echo "已结束旧 MyMac 实例；重新 open 将启动本次新构建" || true
 echo "$APP"
