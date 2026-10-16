@@ -330,6 +330,9 @@ impl ScreenshotManager {
     /// 否则视口会被移除——logic() 与 ui() 每次都要调用本方法。
     /// 主窗口隐藏时 ui() 不跑，logic() 仍会执行，保证覆盖层可以唤起。
     pub fn declare(&mut self, ctx: &egui::Context) {
+        if self.overlay.lock().unwrap().visible {
+            crate::macos::raise_windows_titled_prefix("screenshot-overlay");
+        }
         {
             for display in &self.displays {
                 let id = viewport_id(display.id);
@@ -686,29 +689,6 @@ fn render_scene(
     pointer: Option<egui::Pos2>,
 ) {
     let to_local = |r: egui::Rect| r.intersect(tile_rect).translate(-tile_rect.min.to_vec2());
-
-    // 选区外的压暗遮罩
-    if let Some(sel) = overlay.selection {
-        let full = tile_rect;
-        let sides = [
-            egui::Rect::from_two_pos(full.min, egui::pos2(full.max.x, sel.min.y)),
-            egui::Rect::from_two_pos(egui::pos2(full.min.x, sel.max.y), full.max),
-            egui::Rect::from_two_pos(
-                egui::pos2(full.min.x, sel.min.y),
-                egui::pos2(sel.min.x, sel.max.y),
-            ),
-            egui::Rect::from_two_pos(
-                egui::pos2(sel.max.x, sel.min.y),
-                egui::pos2(full.max.x, sel.max.y),
-            ),
-        ];
-        for side in sides {
-            let local = to_local(side);
-            if local.is_positive() {
-                painter.rect_filled(local, 0.0, egui::Color32::from_black_alpha(110));
-            }
-        }
-    }
 
     // 标注（全局坐标，裁剪到选区）
     let clip = overlay.selection.map(to_local);
