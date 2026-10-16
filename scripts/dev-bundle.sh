@@ -34,16 +34,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 用 Developer ID 签名：身份稳定，钥匙串授权一次后跨重建有效；
-# 失败时回退 ad-hoc 并大声警告（ad-hoc 每次构建身份都变，钥匙串会反复弹授权）。
-# 注意：Developer ID 必须能访问 Apple 时间戳服务器，沙箱/断网环境会失败。
+# 用 Developer ID 签名：身份稳定，钥匙串授权一次后跨重建有效。
+# 1) --timestamp：可分发标准（需能访问 Apple 时间戳服务器）；
+# 2) --timestamp=none：时间戳服务不可达时（如沙箱），身份仍是 Developer ID，
+#    本地开发与钥匙串授权不受影响，只是未经公证；
+# 3) ad-hoc：最后手段（每次构建身份都变，钥匙串会反复要求授权）。
 IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
 if [ -n "${IDENTITY:-}" ]; then
     if codesign --force --timestamp -o runtime -s "$IDENTITY" "$APP" 2>/dev/null; then
-        echo "已用 Developer ID 签名：$IDENTITY"
+        echo "已用 Developer ID 签名（含时间戳）：$IDENTITY"
+    elif codesign --force --timestamp=none -o runtime -s "$IDENTITY" "$APP" 2>/dev/null; then
+        echo "已用 Developer ID 签名（无时间戳，本地开发用）：$IDENTITY"
     else
-        echo "⚠️  Developer ID 签名失败（无法访问时间戳服务？），已回退 ad-hoc。" >&2
-        echo "⚠️  ad-hoc 身份每次构建都会变，钥匙串将要求重新授权；请在联网的本地终端重跑本脚本。" >&2
+        echo "⚠️  Developer ID 签名失败，已回退 ad-hoc。" >&2
+        echo "⚠️  ad-hoc 身份每次构建都会变，钥匙串将要求重新授权。" >&2
         codesign --force -s - "$APP"
     fi
 else

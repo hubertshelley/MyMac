@@ -31,12 +31,20 @@ pub fn recognize_png(data: &str) -> Result<OcrResult, String> {
     if width == 0 || height == 0 {
         return Err("图片尺寸无效".to_string());
     }
+    recognize_rgba(rgba.into_raw(), width, height)
+}
+
+/// 识别 RGBA 像素数据中的文字（截图覆盖层直调用，免 base64 往返）。
+pub fn recognize_rgba(rgba: Vec<u8>, width: u32, height: u32) -> Result<OcrResult, String> {
+    if width == 0 || height == 0 {
+        return Err("图片尺寸无效".to_string());
+    }
 
     // 将 RGBA 像素写入临时 PNG 文件，供 Vision 通过 URL 加载
     let temp_dir = std::env::temp_dir().join("mymac-ocr");
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
     let temp_file = temp_dir.join(format!("{}.png", scru128::new_string()));
-    let png_bytes = encode_png(rgba.as_raw(), width, height)?;
+    let png_bytes = encode_png(&rgba, width, height)?;
     std::fs::write(&temp_file, &png_bytes).map_err(|e| format!("写入临时图片失败：{e}"))?;
 
     let result = recognize_file(&temp_file);

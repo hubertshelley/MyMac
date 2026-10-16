@@ -29,7 +29,9 @@ global-hotkey = "0.8" # 全局快捷键 F1
 log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-rfd = "0.17" # 原生文件选择对话框（导入二维码图片等）
+rfd = "0.17" # 原生文件选择对话框（导入二维码图片、保存截图等）
+fontdue = "0.9.4"  # 标注文本离线栅格化
+arboard = "3"      # 截图复制到剪贴板
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

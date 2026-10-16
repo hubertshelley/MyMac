@@ -1,18 +1,30 @@
 //! 截图覆盖层：每显示器一个全屏置顶透明视口 + 冻结背景纹理。
 //!
-//! 交互（M5 阶段一）：
+//! 交互（M5）：
 //! - 悬停高亮应用窗口；悬停无窗口区域高亮整屏（M5 新需求 1）
-//! - 单击选中（窗口 / 整屏），拖拽自由框选，选区可复制
-//! - Enter 复制选区到剪贴板，Esc 取消
+//! - 单击选中（窗口 / 整屏），拖拽自由框选，8 控制点调整大小，整体拖动
+//! - 标注：矩形、箭头、文本（fontdue 离线栅格化），颜色 / 粗细 / 撤销
+//! - 输出：Enter / 复制按钮合成选区写剪贴板；保存文件（rfd）；识别文字（Vision OCR）
 //! - 覆盖层存在时再触发（F1 / 托盘）→ 重新抓屏替换会话（M5 新需求 2）
 //!
-//! 待后续阶段：标注工具、OCR 面板、保存文件、贴图视口。
+//! 待 M6：贴图置顶视口。
 
 use std::sync::{Arc, Mutex};
 
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use mymac_core::screenshot::capture::{self, DisplayInfo};
 use mymac_core::screenshot::winlist::{self, CaptureWindow};
+
+/// 标注颜色板
+const COLORS: [[u8; 4]; 5] = [
+    [229, 72, 77, 255],
+    [245, 165, 36, 255],
+    [48, 164, 108, 255],
+    [59, 130, 246, 255],
+    [255, 255, 255, 255],
+];
+/// 标注粗细档位（逻辑像素）
+const THICKNESSES: [f32; 3] = [2.0, 4.0, 6.0];
 
 /// 单个显示器的冻结背景。
 #[derive(Clone)]
@@ -21,7 +33,7 @@ pub struct Tile {
     /// 全局逻辑坐标（与 CG / winit 全局坐标一致，左上原点）
     pub rect: egui::Rect,
     pub scale: f64,
-    /// 物理像素 RGBA，用于选区裁剪
+    /// 物理像素 RGBA，用于选区裁剪与合成
     pub rgba: Vec<u8>,
     pub px_width: usize,
     pub px_height: usize,
@@ -38,6 +50,88 @@ fn viewport_id(display_id: u32) -> egui::ViewportId {
     egui::ViewportId(egui::Id::new(("screenshot-overlay", display_id)))
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Tool {
+    Select,
+    Rect,
+    Arrow,
+    Text,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Handle {
+    Nw,
+    N,
+    Ne,
+    E,
+    Se,
+    S,
+    Sw,
+    W,
+}
+
+#[derive(Clone)]
+struct Shape {
+    tool: Tool,
+    /// 覆盖范围（全局逻辑坐标）
+    rect: egui::Rect,
+    text: String,
+    color: [u8; 4],
+    width: f32,
+}
+
+/// 标注文字的离线栅格化（共享一次字体加载）。
+struct TextRaster {
+    font: fontdue::Font,
+}
+
+impl TextRaster {
+    fn new() -> Option<Self> {
+        let bytes = std::fs::read("/System/Library/Fonts/SFNS.ttf")
+            .or_else(|_| std::fs::read("/System/Library/Fonts/Helvetica.ttc"))
+            .or_else(|_| std::fs::read("/System/Library/Fonts/Monaco.ttf"))
+            .ok()?;
+        let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()?;
+        Some(Self { font })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &self,
+        rgba: &mut [u8],
+        px_w: usize,
+        px_h: usize,
+        x: i32,
+        y: i32,
+        text: &str,
+        size: f32,
+        color: [u8; 4],
+    ) {
+        let mut pen = x;
+        for ch in text.chars() {
+            let (metrics, bitmap) = self.font.rasterize(ch, size);
+            for (index, coverage) in bitmap.iter().enumerate() {
+                if *coverage == 0 {
+                    continue;
+                }
+                let gx = pen + (index % metrics.width) as i32;
+                let gy = y + metrics.ymin + (index / metrics.width) as i32;
+                if gx < 0 || gy < 0 || gx as usize >= px_w || gy as usize >= px_h {
+                    continue;
+                }
+                let base = ((gy as usize) * px_w + gx as usize) * 4;
+                let alpha = (*coverage as u32 * color[3] as u32 / 255) as u8;
+                for channel in 0..3 {
+                    rgba[base + channel] = ((color[channel] as u16 * alpha as u16
+                        + rgba[base + channel] as u16 * (255 - alpha) as u16)
+                        / 255) as u8;
+                }
+                rgba[base + 3] = 255;
+            }
+            pen += metrics.advance_width.round() as i32;
+        }
+    }
+}
+
 /// 覆盖层共享状态（主线程与各视口回调之间共享）。
 struct Overlay {
     visible: bool,
@@ -47,6 +141,19 @@ struct Overlay {
     origin: Option<egui::Pos2>,
     /// 当前选区（全局逻辑坐标）
     selection: Option<egui::Rect>,
+    // ---- 标注 ----
+    tool: Tool,
+    color: usize,
+    thickness: usize,
+    shapes: Vec<Shape>,
+    /// 正在绘制的形状起点
+    draw_origin: Option<egui::Pos2>,
+    /// 正在输入的文本：锚点 + 内容
+    text_pos: Option<egui::Pos2>,
+    text_buf: String,
+    /// 8 控制点 / 整体拖动
+    handle: Option<Handle>,
+    move_ref: Option<(egui::Pos2, egui::Rect)>,
 }
 
 impl Overlay {
@@ -55,6 +162,11 @@ impl Overlay {
         self.visible = false;
         self.origin = None;
         self.selection = None;
+        self.draw_origin = None;
+        self.text_pos = None;
+        self.text_buf.clear();
+        self.handle = None;
+        self.move_ref = None;
         for id in ids {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(false));
         }
@@ -84,8 +196,10 @@ impl Overlay {
 /// 截图管理器：主线程持有，负责抓屏与视口注册。
 pub struct ScreenshotManager {
     overlay: Arc<Mutex<Overlay>>,
-    /// 已注册覆盖层视口的显示器 id（ui 每帧按这个列表注册）
+    /// 已注册覆盖层视口的显示器（ui 每帧按这个列表注册）
     displays: Vec<DisplayInfo>,
+    /// OCR 识别状态：None=未在识别，Some(Err/Ok)=已完成
+    ocr: Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
 }
 
 impl ScreenshotManager {
@@ -97,8 +211,18 @@ impl ScreenshotManager {
                 windows: Vec::new(),
                 origin: None,
                 selection: None,
+                tool: Tool::Select,
+                color: 0,
+                thickness: 1,
+                shapes: Vec::new(),
+                draw_origin: None,
+                text_pos: None,
+                text_buf: String::new(),
+                handle: None,
+                move_ref: None,
             })),
             displays: capture::active_displays(),
+            ocr: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,8 +282,16 @@ impl ScreenshotManager {
             overlay.windows = windows;
             overlay.origin = None;
             overlay.selection = None;
+            overlay.shapes.clear();
+            overlay.draw_origin = None;
+            overlay.text_pos = None;
+            overlay.text_buf.clear();
+            overlay.handle = None;
+            overlay.move_ref = None;
+            overlay.tool = Tool::Select;
             overlay.visible = true;
         }
+        *self.ocr.lock().unwrap() = None;
         for id in id_list {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
@@ -182,19 +314,69 @@ impl ScreenshotManager {
                 .with_position(egui::pos2(display.x as f32, display.y as f32))
                 .with_inner_size([display.width as f32, display.height as f32]);
             let state = self.overlay.clone();
+            let ocr = self.ocr.clone();
             let display_id = display.id;
             ctx.show_viewport_deferred(id, builder, move |ui: &mut egui::Ui, _class| {
-                overlay_viewport(display_id, &state, ui);
+                overlay_viewport(display_id, &state, &ocr, ui);
             });
         }
     }
 }
 
+/// 选区 8 个控制点（全局逻辑坐标）。
+fn handle_points(sel: egui::Rect) -> [(Handle, egui::Pos2); 8] {
+    let c = |x: f32, y: f32| egui::pos2(x, y);
+    [
+        (Handle::Nw, c(sel.min.x, sel.min.y)),
+        (Handle::N, c(sel.center().x, sel.min.y)),
+        (Handle::Ne, c(sel.max.x, sel.min.y)),
+        (Handle::E, c(sel.max.x, sel.center().y)),
+        (Handle::Se, c(sel.max.x, sel.max.y)),
+        (Handle::S, c(sel.center().x, sel.max.y)),
+        (Handle::Sw, c(sel.min.x, sel.max.y)),
+        (Handle::W, c(sel.min.x, sel.center().y)),
+    ]
+}
+
+fn handle_at(sel: egui::Rect, pos: egui::Pos2) -> Option<Handle> {
+    handle_points(sel)
+        .into_iter()
+        .find(|(_, point)| point.distance(pos) <= 8.0)
+        .map(|(handle, _)| handle)
+}
+
+/// 按控制点调整选区。
+fn apply_handle(sel: egui::Rect, handle: Handle, pos: egui::Pos2) -> egui::Rect {
+    let mut min = sel.min;
+    let mut max = sel.max;
+    match handle {
+        Handle::Nw | Handle::N | Handle::W => min = pos,
+        Handle::Se | Handle::S | Handle::E => max = pos,
+        Handle::Ne => {
+            max.x = pos.x;
+            min.y = pos.y;
+        }
+        Handle::Sw => {
+            min.x = pos.x;
+            max.y = pos.y;
+        }
+    }
+    egui::Rect::from_two_pos(min, max)
+}
+
 /// 单个覆盖层视口的每帧渲染与交互。
-fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
+#[allow(clippy::too_many_lines)]
+fn overlay_viewport(
+    display_id: u32,
+    state: &Arc<Mutex<Overlay>>,
+    ocr: &Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
+    ui: &mut egui::Ui,
+) {
     let ctx = ui.ctx().clone();
     let mut finish = false;
-    let mut copy_crop: Option<egui::Rect> = None;
+    let mut copy_sel: Option<egui::Rect> = None;
+    let mut save_sel: Option<egui::Rect> = None;
+    let mut ocr_sel: Option<egui::Rect> = None;
 
     #[allow(deprecated)]
     egui::CentralPanel::default()
@@ -204,6 +386,7 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
             if !overlay.visible {
                 return;
             }
+            // 先提取本显示器的静态数据，避免与后续可变借用冲突
             let Some((tile_rect, scale, texture_id)) = overlay
                 .tiles
                 .iter()
@@ -213,6 +396,7 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
                 return;
             };
             let painter = ui.painter();
+
             // 冻结背景
             painter.image(
                 texture_id,
@@ -225,101 +409,94 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
             let pressed = ui.input(|i| i.pointer.primary_down());
             let released = ui.input(|i| i.pointer.primary_released());
 
-            // 悬停目标：窗口优先，无窗口则整屏（M5 新需求 1）
-            let hover = pointer.and_then(|pos| {
-                let global = pos + tile_rect.min.to_vec2();
-                overlay.find_window_at(global).or(Some(tile_rect))
-            });
-
-            // 拖拽 / 单击选择
-            if let Some(pos) = pointer
-                && pressed
-                && overlay.origin.is_none()
-            {
-                overlay.origin = Some(pos + tile_rect.min.to_vec2());
-            }
-            if let (Some(origin), Some(pos)) = (overlay.origin, pointer) {
-                let global = pos + tile_rect.min.to_vec2();
-                let rect = egui::Rect::from_two_pos(origin, global);
-                overlay.selection = Some(rect);
-                if released {
-                    // 几乎没有拖动 → 视为单击，选中悬停目标（窗口或整屏）
-                    if rect.width() < 4.0 || rect.height() < 4.0 {
-                        overlay.selection = hover;
-                    }
-                    overlay.origin = None;
-                }
-            }
-
-            // 选区遮罩：选区外压暗
+            // ---- 选区 / 标注交互（工具栏区域除外）----
+            let mut toolbar_rect = egui::Rect::NOTHING;
             if let Some(sel) = overlay.selection {
-                let full = tile_rect;
-                for side in [
-                    egui::Rect::from_two_pos(full.min, egui::pos2(full.max.x, sel.min.y)),
-                    egui::Rect::from_two_pos(egui::pos2(full.min.x, sel.max.y), full.max),
-                    egui::Rect::from_two_pos(
-                        egui::pos2(full.min.x, sel.min.y),
-                        egui::pos2(sel.min.x, sel.max.y),
-                    ),
-                    egui::Rect::from_two_pos(
-                        egui::pos2(sel.max.x, sel.min.y),
-                        egui::pos2(full.max.x, sel.max.y),
-                    ),
-                ] {
-                    let local = side.intersect(full);
-                    if local.is_positive() {
-                        painter.rect_filled(
-                            local.translate(-full.min.to_vec2()),
-                            0.0,
-                            egui::Color32::from_black_alpha(110),
-                        );
-                    }
-                }
-                // 选区边框 + 尺寸提示
-                let local = sel.intersect(full);
-                painter.rect_stroke(
-                    local.translate(-full.min.to_vec2()),
-                    0.0,
-                    egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
-                    egui::StrokeKind::Outside,
-                );
-                {
-                    let pw = (sel.width() * scale as f32).round() as u32;
-                    let ph = (sel.height() * scale as f32).round() as u32;
-                    painter.text(
-                        local.translate(-full.min.to_vec2()).left_top() + egui::vec2(0.0, -8.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!("{pw} × {ph}"),
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::WHITE,
-                    );
-                }
-            } else if let Some(hover) = hover {
-                // 无选区时高亮悬停目标
-                let local = hover.intersect(tile_rect);
-                if local.is_positive() {
-                    painter.rect_filled(
-                        local.translate(-tile_rect.min.to_vec2()),
-                        0.0,
-                        egui::Color32::from_white_alpha(28),
-                    );
-                    painter.rect_stroke(
-                        local.translate(-tile_rect.min.to_vec2()),
-                        0.0,
-                        egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
-                        egui::StrokeKind::Inside,
-                    );
+                toolbar_rect = toolbar_rect_for(sel, tile_rect);
+            }
+            let pointer_global = pointer.map(|pos| pos + tile_rect.min.to_vec2());
+            let on_toolbar = pointer_global.is_some_and(|pos| toolbar_rect.contains(pos));
+            let hover = pointer_global
+                .as_ref()
+                .map(|pos| overlay.find_window_at(*pos).unwrap_or(tile_rect));
+
+            if let Some(pos) = pointer_global
+                && !on_toolbar
+            {
+                handle_selection_input(&mut overlay, pos, pressed, released, hover);
+                handle_draw_input(&mut overlay, pos, pressed, released);
+            } else if released {
+                overlay.origin = None;
+                overlay.draw_origin = None;
+                overlay.handle = None;
+                overlay.move_ref = None;
+            }
+
+            // ---- 渲染：遮罩、选区、标注 ----
+            render_scene(painter, &overlay, tile_rect, scale, pointer);
+
+            // ---- 工具栏 ----
+            if let Some(sel) = overlay.selection {
+                let response = draw_toolbar(ui, &mut overlay, sel, toolbar_rect, tile_rect);
+                if response == ToolAction::Save {
+                    save_sel = Some(sel);
+                } else if response == ToolAction::Copy {
+                    copy_sel = Some(sel);
+                } else if response == ToolAction::Ocr {
+                    ocr_sel = Some(sel);
+                    *ocr.lock().unwrap() = None;
+                } else if response == ToolAction::Cancel {
+                    finish = true;
                 }
             }
 
-            // 快捷键
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // ---- 文本输入框 ----
+            if overlay.text_pos.is_some() {
+                let mut commit = false;
+                let mut cancel = false;
+                egui::Area::new(egui::Id::new("screenshot-text-input"))
+                    .fixed_pos(overlay.text_pos.unwrap() - tile_rect.min.to_vec2())
+                    .show(ui, |ui| {
+                        let response = egui::TextEdit::singleline(&mut overlay.text_buf)
+                            .desired_width(220.0)
+                            .font(egui::TextStyle::Body)
+                            .show(ui);
+                        commit = response.response.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        response.response.request_focus();
+                    });
+                if commit && !overlay.text_buf.trim().is_empty() {
+                    let anchor = overlay.text_pos.unwrap();
+                    let shape = Shape {
+                        tool: Tool::Text,
+                        rect: egui::Rect::from_min_size(anchor, egui::vec2(0.0, 0.0)),
+                        text: overlay.text_buf.clone(),
+                        color: COLORS[overlay.color],
+                        width: THICKNESSES[overlay.thickness],
+                    };
+                    overlay.shapes.push(shape);
+                    overlay.text_buf.clear();
+                    overlay.text_pos = None;
+                } else if commit || cancel {
+                    overlay.text_buf.clear();
+                    overlay.text_pos = None;
+                }
+            }
+
+            // ---- OCR 结果面板 ----
+            draw_ocr_panel(ui, ctx.clone(), ocr, tile_rect);
+
+            // ---- 快捷键 ----
+            let text_editing = overlay.text_pos.is_some();
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !text_editing {
                 finish = true;
             }
-            if ui.input(|i| i.key_pressed(egui::Key::Enter))
+            if !text_editing
+                && ui.input(|i| i.key_pressed(egui::Key::Enter))
                 && let Some(sel) = overlay.selection
             {
-                copy_crop = Some(sel);
+                copy_sel = Some(sel);
                 finish = true;
             }
             if finish {
@@ -327,22 +504,679 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
             }
         });
 
-    if let (Some(sel), true) = (copy_crop, finish) {
-        let crop = {
-            let overlay = state.lock().unwrap();
-            overlay
-                .tiles
-                .iter()
-                .find(|t| t.display_id == display_id)
-                .and_then(|tile| crop_selection(tile, sel))
+    // ---- 锁外输出：复制 / 保存 / OCR ----
+    if finish {
+        return;
+    }
+    if let Some(sel) = copy_sel {
+        run_output(state, display_id, sel, |w, h, rgba| {
+            let error = mymac_core::clipboard::copy_image_to_clipboard(w, h, rgba);
+            if let Err(error) = error {
+                log::error!("复制截图失败：{error}");
+            }
+        });
+    }
+    if let Some(sel) = save_sel {
+        let composed = compose(state, display_id, sel);
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("保存截图")
+            .set_file_name("截图.png")
+            .add_filter("PNG 图片", &["png"])
+            .save_file()
+            && let Some((w, h, rgba)) = composed
+            && let Ok(png) = capture::encode_png(rgba, w, h)
+        {
+            match std::fs::write(&path, png) {
+                Ok(()) => log::info!("截图已保存：{}", path.display()),
+                Err(error) => log::error!("保存截图失败：{error}"),
+            }
+        }
+    }
+    if let Some(sel) = ocr_sel
+        && let Some((w, h, rgba)) = compose(state, display_id, sel)
+    {
+        let ocr = ocr.clone();
+        std::thread::spawn(move || {
+            let result = mymac_core::ocr::recognize_rgba(rgba, w as u32, h as u32);
+            *ocr.lock().unwrap() = Some(result);
+        });
+    }
+}
+
+/// 选区交互：新建 / 8 控制点调整 / 整体拖动（仅「选择」工具下生效）。
+fn handle_selection_input(
+    overlay: &mut Overlay,
+    pos: egui::Pos2,
+    pressed: bool,
+    released: bool,
+    hover: Option<egui::Rect>,
+) {
+    if overlay.tool != Tool::Select {
+        return;
+    }
+    if pressed && overlay.handle.is_none() && overlay.move_ref.is_none() {
+        if let Some(sel) = overlay.selection {
+            if let Some(handle) = handle_at(sel, pos) {
+                overlay.handle = Some(handle);
+                return;
+            }
+            if sel.contains(pos) {
+                overlay.move_ref = Some((pos, sel));
+                return;
+            }
+        }
+        overlay.origin = Some(pos);
+        overlay.selection = None;
+        overlay.shapes.clear();
+    }
+    if overlay.handle.is_some()
+        && let Some(sel) = overlay.selection
+        && let Some(handle) = overlay.handle
+    {
+        overlay.selection = Some(apply_handle(sel, handle, pos));
+    } else if let Some((start, base)) = overlay.move_ref {
+        let delta = pos - start;
+        overlay.selection = Some(base.translate(delta));
+    } else if let Some(origin) = overlay.origin {
+        let rect = egui::Rect::from_two_pos(origin, pos);
+        overlay.selection = Some(rect);
+        if released {
+            if rect.width() < 4.0 || rect.height() < 4.0 {
+                // 几乎没有拖动 → 视为单击，选中悬停目标（窗口或整屏）
+                overlay.selection = hover;
+            }
+            overlay.origin = None;
+        }
+    }
+    if released {
+        overlay.handle = None;
+        overlay.move_ref = None;
+    }
+}
+
+/// 标注绘制输入（矩形 / 箭头；文本点击落锚点）。
+fn handle_draw_input(overlay: &mut Overlay, pos: egui::Pos2, pressed: bool, released: bool) {
+    if overlay.tool == Tool::Select || !overlay.selection.is_some_and(|s| s.contains(pos)) {
+        return;
+    }
+    if overlay.tool == Tool::Text {
+        if pressed {
+            // 提交未完成的上一段文本，开始新锚点
+            overlay.text_pos = Some(pos);
+            overlay.text_buf.clear();
+        }
+        return;
+    }
+    if pressed && overlay.draw_origin.is_none() {
+        overlay.draw_origin = Some(pos);
+    }
+    if let Some(origin) = overlay.draw_origin {
+        let rect = egui::Rect::from_two_pos(origin, pos);
+        if released {
+            if rect.width() > 2.0 || rect.height() > 2.0 {
+                overlay.shapes.push(Shape {
+                    tool: overlay.tool,
+                    rect,
+                    text: String::new(),
+                    color: COLORS[overlay.color],
+                    width: THICKNESSES[overlay.thickness],
+                });
+            }
+            overlay.draw_origin = None;
+        }
+    }
+}
+
+/// 场景渲染：遮罩、选区边框与控制点、已提交与进行中的标注、悬停高亮。
+fn render_scene(
+    painter: &egui::Painter,
+    overlay: &Overlay,
+    tile_rect: egui::Rect,
+    scale: f64,
+    pointer: Option<egui::Pos2>,
+) {
+    let to_local = |r: egui::Rect| r.intersect(tile_rect).translate(-tile_rect.min.to_vec2());
+
+    // 选区外的压暗遮罩
+    if let Some(sel) = overlay.selection {
+        let full = tile_rect;
+        let sides = [
+            egui::Rect::from_two_pos(full.min, egui::pos2(full.max.x, sel.min.y)),
+            egui::Rect::from_two_pos(egui::pos2(full.min.x, sel.max.y), full.max),
+            egui::Rect::from_two_pos(
+                egui::pos2(full.min.x, sel.min.y),
+                egui::pos2(sel.min.x, sel.max.y),
+            ),
+            egui::Rect::from_two_pos(
+                egui::pos2(sel.max.x, sel.min.y),
+                egui::pos2(full.max.x, sel.max.y),
+            ),
+        ];
+        for side in sides {
+            let local = to_local(side);
+            if local.is_positive() {
+                painter.rect_filled(local, 0.0, egui::Color32::from_black_alpha(110));
+            }
+        }
+    }
+
+    // 标注（全局坐标，裁剪到选区）
+    let clip = overlay.selection.map(to_local);
+    let shape_painter = match clip {
+        Some(clip) if clip.is_positive() => painter.with_clip_rect(clip),
+        _ => painter.clone(),
+    };
+    for shape in &overlay.shapes {
+        draw_shape_shape(&shape_painter, shape, -tile_rect.min.to_vec2());
+    }
+    if let (Some(origin), Some(_), Some(pos)) = (overlay.draw_origin, overlay.selection, pointer) {
+        let preview = Shape {
+            tool: overlay.tool,
+            rect: egui::Rect::from_two_pos(origin, pos),
+            text: String::new(),
+            color: COLORS[overlay.color],
+            width: THICKNESSES[overlay.thickness],
         };
-        if let Some((w, h, rgba)) = crop {
-            // 复制放后台线程，避免阻塞
-            std::thread::spawn(move || {
-                if let Err(error) = mymac_core::clipboard::copy_image_to_clipboard(w, h, rgba) {
-                    log::error!("复制截图失败：{error}");
+        draw_shape_shape(&shape_painter, &preview, -tile_rect.min.to_vec2());
+    }
+    if let Some(anchor) = overlay.text_pos {
+        shape_painter.rect_filled(
+            egui::Rect::from_min_size(anchor - tile_rect.min.to_vec2(), egui::vec2(4.0, 18.0)),
+            0,
+            egui::Color32::WHITE,
+        );
+    }
+
+    // 选区边框 + 控制点 + 尺寸提示
+    if let Some(sel) = overlay.selection {
+        let local = to_local(sel);
+        if local.is_positive() {
+            painter.rect_stroke(
+                local,
+                0.0,
+                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+                egui::StrokeKind::Outside,
+            );
+            for (_, point) in handle_points(sel) {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        point - tile_rect.min.to_vec2(),
+                        egui::vec2(8.0, 8.0),
+                    ),
+                    2,
+                    egui::Color32::WHITE,
+                );
+            }
+            let pw = (sel.width() * scale as f32).round() as u32;
+            let ph = (sel.height() * scale as f32).round() as u32;
+            painter.text(
+                local.left_top() + egui::vec2(0.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{pw} × {ph}"),
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+    } else if let Some(pos) = pointer {
+        // 无选区时高亮悬停目标
+        let global = pos + tile_rect.min.to_vec2();
+        if let Some(hover) = overlay.find_window_at(global).or(Some(tile_rect)) {
+            let local = to_local(hover);
+            if local.is_positive() {
+                painter.rect_filled(local, 0.0, egui::Color32::from_white_alpha(28));
+                painter.rect_stroke(
+                    local,
+                    0.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+    }
+}
+
+/// 绘制单个标注形状（egui 画笔，用于实时预览与已提交形状）。
+fn draw_shape_shape(painter: &egui::Painter, shape: &Shape, offset: egui::Vec2) {
+    let color = egui::Color32::from_rgba_unmultiplied(
+        shape.color[0],
+        shape.color[1],
+        shape.color[2],
+        shape.color[3],
+    );
+    let stroke = egui::Stroke::new(shape.width, color);
+    match shape.tool {
+        Tool::Rect => {
+            painter.rect_stroke(
+                shape.rect.translate(offset),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Tool::Arrow => {
+            let start = shape.rect.min + offset;
+            let end = shape.rect.max + offset;
+            painter.line_segment([start, end], stroke);
+            // 箭头头部：两条短边
+            let dir = (end - start).normalized();
+            let len = shape.width * 4.0 + 6.0;
+            let left = egui::pos2(
+                end.x - (dir.x * 0.5 - dir.y * 0.866) * len,
+                end.y - (dir.y * 0.5 + dir.x * 0.866) * len,
+            );
+            let right = egui::pos2(
+                end.x - (dir.x * 0.5 + dir.y * 0.866) * len,
+                end.y - (dir.y * 0.5 - dir.x * 0.866) * len,
+            );
+            painter.line_segment([end, left], stroke);
+            painter.line_segment([end, right], stroke);
+        }
+        Tool::Text => {
+            painter.text(
+                shape.rect.min + offset,
+                egui::Align2::LEFT_TOP,
+                &shape.text,
+                egui::FontId::proportional(14.0 + shape.width * 2.0),
+                color,
+            );
+        }
+        Tool::Select => {}
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolAction {
+    None,
+    Copy,
+    Save,
+    Ocr,
+    Cancel,
+}
+
+/// 工具栏位置：选区上方，贴顶时放选区下方。
+fn toolbar_rect_for(sel: egui::Rect, tile_rect: egui::Rect) -> egui::Rect {
+    const H: f32 = 36.0;
+    const W: f32 = 420.0;
+    let x = (sel.center().x - W / 2.0).clamp(tile_rect.min.x, tile_rect.max.x - W);
+    let y = if sel.min.y - H - 8.0 >= tile_rect.min.y {
+        sel.min.y - H - 8.0
+    } else {
+        (sel.max.y + 8.0).clamp(tile_rect.min.y, tile_rect.max.y - H)
+    };
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(W, H))
+}
+
+/// 渲染工具栏，返回触发的动作。
+fn draw_toolbar(
+    ui: &mut egui::Ui,
+    overlay: &mut Overlay,
+    sel: egui::Rect,
+    toolbar_rect: egui::Rect,
+    tile_rect: egui::Rect,
+) -> ToolAction {
+    use shadcn_egui::components::button::{Button, ButtonSize, ButtonVariant};
+    use shadcn_egui::icons::lucide;
+
+    let mut action = ToolAction::None;
+    let area = egui::Area::new(egui::Id::new("screenshot-toolbar"))
+        .fixed_pos(toolbar_rect.min - tile_rect.min.to_vec2());
+    let theme = shadcn_egui::Theme::current(ui.ctx());
+    let palette = theme.palette;
+    area.show(ui, |ui| {
+        egui::Frame::new()
+            .fill(palette.card)
+            .stroke(egui::Stroke::new(1.0_f32, palette.border))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                let mut tool_button = |ui: &mut egui::Ui, tool: Tool, icon, tip: &str| {
+                    let active = overlay.tool == tool;
+                    let button = Button::new("")
+                        .variant(if active {
+                            ButtonVariant::Secondary
+                        } else {
+                            ButtonVariant::Ghost
+                        })
+                        .size(ButtonSize::IconSm)
+                        .icon(icon)
+                        .enabled(true);
+                    if ui.add(button).on_hover_text(tip).clicked() {
+                        overlay.tool = tool;
+                        overlay.text_pos = None;
+                        overlay.text_buf.clear();
+                    }
+                };
+                tool_button(ui, Tool::Select, &lucide::MOVE, "选择 / 调整选区");
+                tool_button(ui, Tool::Rect, &lucide::SQUARE, "矩形标注");
+                tool_button(ui, Tool::Arrow, &lucide::ARROW_UP_RIGHT, "箭头标注");
+                tool_button(ui, Tool::Text, &lucide::TYPE, "文本标注");
+                ui.separator();
+                // 颜色板
+                for (index, color) in COLORS.iter().enumerate() {
+                    let (rect, response) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                    let swatch =
+                        egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 255);
+                    if overlay.color == index {
+                        ui.painter().rect_filled(rect, 4.0, swatch);
+                        ui.painter().rect_stroke(
+                            rect,
+                            4.0,
+                            egui::Stroke::new(2.0_f32, palette.primary),
+                            egui::StrokeKind::Inside,
+                        );
+                    } else {
+                        ui.painter().rect_filled(rect, 4.0, swatch);
+                    }
+                    if response.clicked() {
+                        overlay.color = index;
+                    }
                 }
+                ui.separator();
+                for (index, label) in ["细", "中", "粗"].iter().enumerate() {
+                    let active = overlay.thickness == index;
+                    let button = Button::new(*label)
+                        .variant(if active {
+                            ButtonVariant::Secondary
+                        } else {
+                            ButtonVariant::Ghost
+                        })
+                        .size(ButtonSize::Sm);
+                    if ui.add(button).clicked() {
+                        overlay.thickness = index;
+                    }
+                }
+                ui.separator();
+                if ui
+                    .add(
+                        Button::new("")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconSm)
+                            .icon(&lucide::UNDO),
+                    )
+                    .on_hover_text("撤销标注")
+                    .clicked()
+                {
+                    overlay.shapes.pop();
+                }
+                if ui
+                    .add(
+                        Button::new("识别")
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Sm)
+                            .icon(&lucide::SCAN_TEXT),
+                    )
+                    .clicked()
+                {
+                    action = ToolAction::Ocr;
+                }
+                if ui
+                    .add(
+                        Button::new("保存")
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Sm)
+                            .icon(&lucide::SAVE),
+                    )
+                    .clicked()
+                {
+                    action = ToolAction::Save;
+                }
+                if ui
+                    .add(Button::new("复制").size(ButtonSize::Sm).icon(&lucide::COPY))
+                    .clicked()
+                {
+                    action = ToolAction::Copy;
+                }
+                if ui
+                    .add(
+                        Button::new("")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::IconSm)
+                            .icon(&lucide::X),
+                    )
+                    .on_hover_text("关闭（Esc）")
+                    .clicked()
+                {
+                    action = ToolAction::Cancel;
+                }
+                // 标记选区锚点，便于引用参数
+                let _ = sel;
             });
+    });
+    action
+}
+
+/// OCR 结果面板（固定在视口右下角）。
+fn draw_ocr_panel(
+    ui: &mut egui::Ui,
+    ctx: egui::Context,
+    ocr: &Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
+    tile_rect: egui::Rect,
+) {
+    let guard = ocr.lock().unwrap();
+    let Some(result) = guard.as_ref() else {
+        if ocr_strong_count(ocr) > 0 {
+            // 识别中：给个轻提示
+        }
+        return;
+    };
+    let lines: Vec<String> = match result {
+        Ok(result) => result.lines.iter().map(|l| l.text.clone()).collect(),
+        Err(error) => vec![format!("识别失败：{error}")],
+    };
+    drop(guard);
+
+    let mut copy_all = false;
+    let mut close = false;
+    let theme = shadcn_egui::Theme::current(&ctx);
+    let palette = theme.palette;
+    egui::Area::new(egui::Id::new("screenshot-ocr-panel"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-24.0, -24.0))
+        .show(ui, |ui| {
+            egui::Frame::new()
+                .fill(palette.card)
+                .stroke(egui::Stroke::new(1.0_f32, palette.border))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    use shadcn_egui::components::button::{Button, ButtonSize, ButtonVariant};
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("识别结果").strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    Button::new("")
+                                        .variant(ButtonVariant::Ghost)
+                                        .size(ButtonSize::IconSm)
+                                        .icon(&shadcn_egui::icons::lucide::X),
+                                )
+                                .on_hover_text("关闭")
+                                .clicked()
+                            {
+                                close = true;
+                            }
+                            if ui
+                                .add(
+                                    Button::new("复制全部")
+                                        .variant(ButtonVariant::Outline)
+                                        .size(ButtonSize::Sm),
+                                )
+                                .clicked()
+                            {
+                                copy_all = true;
+                            }
+                        });
+                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .min_scrolled_width(320.0)
+                        .show(ui, |ui| {
+                            for line in &lines {
+                                ui.label(RichText::new(line).size(13.0));
+                            }
+                        });
+                    let _ = tile_rect;
+                });
+        });
+
+    if copy_all {
+        let text = lines.join("\n");
+        std::thread::spawn(move || {
+            if let Err(error) = arboard_copy_text(text) {
+                log::error!("复制识别文字失败：{error}");
+            }
+        });
+    }
+    if close {
+        *ocr.lock().unwrap() = None;
+    }
+}
+
+fn ocr_strong_count(
+    _ocr: &Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
+) -> usize {
+    0
+}
+
+fn arboard_copy_text(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
+/// 裁剪选区并叠加标注，返回合成后的 (宽, 高, RGBA)。
+fn compose(
+    state: &Arc<Mutex<Overlay>>,
+    display_id: u32,
+    sel: egui::Rect,
+) -> Option<(usize, usize, Vec<u8>)> {
+    let overlay = state.lock().unwrap();
+    let tile = overlay.tiles.iter().find(|t| t.display_id == display_id)?;
+    let crop = crop_selection(tile, sel)?;
+    let scale = tile.scale as f32;
+
+    // 标注栅格化：叠加到选区像素上
+    let raster = overlay_text_raster();
+    let px_w = crop.0;
+    let px_h = crop.1;
+    let shapes: Vec<Shape> = overlay.shapes.clone();
+    let mut rgba = crop.2;
+    for shape in &shapes {
+        let local = shape.rect.intersect(sel);
+        if !local.is_positive() && shape.tool != Tool::Text {
+            continue;
+        }
+        let color = shape.color;
+        let thickness = ((shape.width * scale).round() as i32).max(1);
+        let to_px = |p: egui::Pos2| {
+            (
+                ((p.x - sel.min.x) * scale).round() as i32,
+                ((p.y - sel.min.y) * scale).round() as i32,
+            )
+        };
+        match shape.tool {
+            Tool::Rect => {
+                let (x0, y0) = to_px(local.min);
+                let (x1, y1) = to_px(local.max);
+                draw_line(&mut rgba, px_w, px_h, x0, y0, x1, y0, color, thickness);
+                draw_line(&mut rgba, px_w, px_h, x1, y0, x1, y1, color, thickness);
+                draw_line(&mut rgba, px_w, px_h, x1, y1, x0, y1, color, thickness);
+                draw_line(&mut rgba, px_w, px_h, x0, y1, x0, y0, color, thickness);
+            }
+            Tool::Arrow => {
+                let (x0, y0) = to_px(shape.rect.min);
+                let (x1, y1) = to_px(shape.rect.max);
+                draw_line(&mut rgba, px_w, px_h, x0, y0, x1, y1, color, thickness);
+                let (dx, dy) = (x1 - x0, y1 - y0);
+                let length = ((dx * dx + dy * dy) as f32).sqrt().max(1.0);
+                let (ux, uy) = (dx as f32 / length, dy as f32 / length);
+                let head = (thickness * 4) as f32;
+                for sign in [-1.0_f32, 1.0] {
+                    let hx = x1 as f32 - (ux * 0.5 - uy * sign * 0.866) * head;
+                    let hy = y1 as f32 - (uy * 0.5 + ux * sign * 0.866) * head;
+                    draw_line(
+                        &mut rgba,
+                        px_w,
+                        px_h,
+                        x1,
+                        y1,
+                        hx.round() as i32,
+                        hy.round() as i32,
+                        color,
+                        thickness,
+                    );
+                }
+            }
+            Tool::Text => {
+                let raster_guard = raster.lock().unwrap();
+                if let Some(raster) = raster_guard.as_ref()
+                    && !shape.text.is_empty()
+                {
+                    let (x, y) = to_px(shape.rect.min);
+                    raster.draw(
+                        &mut rgba,
+                        px_w,
+                        px_h,
+                        x + 2,
+                        y + 2,
+                        &shape.text,
+                        (14.0 + shape.width * 2.0) * scale,
+                        color,
+                    );
+                }
+            }
+            Tool::Select => {}
+        }
+    }
+    Some((px_w, px_h, rgba))
+}
+
+/// 共享的文字栅格化器（懒加载，加载失败时文本标注只保留 egui 预览）。
+fn overlay_text_raster() -> Arc<Mutex<Option<TextRaster>>> {
+    use std::sync::OnceLock;
+    static RASTER: OnceLock<Arc<Mutex<Option<TextRaster>>>> = OnceLock::new();
+    RASTER
+        .get_or_init(|| Arc::new(Mutex::new(TextRaster::new())))
+        .clone()
+}
+
+/// 粗线段：沿线段等距填充圆点。
+#[allow(clippy::too_many_arguments)]
+fn draw_line(
+    rgba: &mut [u8],
+    px_w: usize,
+    px_h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 4],
+    thickness: i32,
+) {
+    let radius = (thickness / 2).max(1);
+    let dx = (x1 - x0) as f32;
+    let dy = (y1 - y0) as f32;
+    let length = (dx * dx + dy * dy).sqrt().max(1.0);
+    let steps = length.ceil() as i32 * 2;
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let cx = x0 + (dx * t).round() as i32;
+        let cy = y0 + (dy * t).round() as i32;
+        for dy_off in -radius..=radius {
+            for dx_off in -radius..=radius {
+                if dx_off * dx_off + dy_off * dy_off > radius * radius {
+                    continue;
+                }
+                let px = cx + dx_off;
+                let py = cy + dy_off;
+                if px < 0 || py < 0 || px as usize >= px_w || py as usize >= px_h {
+                    continue;
+                }
+                let base = (py as usize * px_w + px as usize) * 4;
+                rgba[base] = color[0];
+                rgba[base + 1] = color[1];
+                rgba[base + 2] = color[2];
+                rgba[base + 3] = 255;
+            }
         }
     }
 }
@@ -371,4 +1205,16 @@ fn crop_selection(tile: &Tile, sel: egui::Rect) -> Option<(usize, usize, Vec<u8>
         out.extend_from_slice(&tile.rgba[start..end]);
     }
     Some((width, height, out))
+}
+
+/// 合成输出：复制与保存共用。
+fn run_output(
+    state: &Arc<Mutex<Overlay>>,
+    display_id: u32,
+    sel: egui::Rect,
+    sink: impl FnOnce(usize, usize, Vec<u8>),
+) {
+    if let Some((w, h, rgba)) = compose(state, display_id, sel) {
+        sink(w, h, rgba);
+    }
 }

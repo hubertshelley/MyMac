@@ -2500,8 +2500,10 @@ dependencies = [
 name = "mymac"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "eframe",
  "env_logger",
+ "fontdue",
  "global-hotkey",
  "image",
  "log",
