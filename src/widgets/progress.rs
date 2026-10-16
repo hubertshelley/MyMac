@@ -16,6 +16,12 @@ impl Progress {
             height: 8.0,
         }
     }
+
+    /// 轨道高度（圆角自动取高度一半）
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = height;
+        self
+    }
 }
 
 impl Widget for Progress {

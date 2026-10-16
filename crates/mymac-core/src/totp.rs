@@ -289,6 +289,18 @@ fn validate_qr_payload(payload: &str) -> Result<String, String> {
     normalize_secret(payload).map_err(|_| "二维码中没有有效的 2FA 密钥或 otpauth 链接".to_string())
 }
 
+/// 从图片字节识别二维码（导入图片文件用）。
+pub fn decode_qr_bytes(bytes: &[u8]) -> Result<String, String> {
+    decode_qr_image(bytes)
+}
+
+/// 预览 otpauth 链接解析结果：名称、发行方、位数、周期（界面回填表单用）。
+pub fn otpauth_preview(input: &str) -> Option<(String, String, u32, u64)> {
+    parse_otpauth(input.trim())
+        .ok()
+        .map(|(name, issuer, _secret, digits, period)| (name, issuer, digits, period))
+}
+
 fn decode_qr_image(bytes: &[u8]) -> Result<String, String> {
     let image = image::load_from_memory(bytes)
         .map_err(|_| "无法读取图片，请选择 PNG 或 JPEG 截图".to_string())?
