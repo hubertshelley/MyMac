@@ -1,5 +1,41 @@
+[package]
+name = "mymac"
+version = "0.1.0"
+description = "MyMac 电脑管家（egui 版）"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
 [workspace]
 resolver = "2"
-members = ["crates/mymac-core", "src-tauri"]
-# poc 独立构建，不纳入 workspace（依赖 egui 0.36，与主工程解耦）
+members = [".", "crates/mymac-core"]
+# poc 独立构建，保留作 M0 验证记录，不纳入 workspace
 exclude = ["poc/egui-poc"]
+
+[dependencies]
+mymac-core = { path = "crates/mymac-core" }
+# egui 版本说明：shadcn-egui 0.4.0 要求 egui 0.34，故锁定 eframe =0.34.1，
+# 待 shadcn-egui 跟进后一并升级。egui 系列 crate 必须保持同一次版本。
+eframe = { version = "=0.34.1", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu", # 渲染后端走 Metal（wgpu）
+] }
+# shadcn/ui 设计体系：主题、预设、组件与 Lucide 图标
+shadcn-egui = "=0.4.0"
+tray-icon = "0.26"    # 托盘
+muda = "0.21"         # 托盘菜单
+global-hotkey = "0.8" # 全局快捷键 F1
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+] }
+
+[profile.release]
+strip = true
+lto = "thin"

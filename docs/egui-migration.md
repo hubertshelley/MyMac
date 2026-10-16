@@ -365,3 +365,11 @@ M0 初版发现并已修复的 Bug：覆盖层关不掉。根因和规则见 3.3
 3. 顺序：主线程抓新背景 → 新背景编码为纹理 → 重置会话状态（选区、标注、OCR 状态清空）→ 以新背景替换纹理 → 旧会话临时文件清理。抓取完成之前保持旧画面，避免闪烁。
 4. 旧选区与标注已被烤进新背景，新会话从空闲态开始。需处理的边界：输入中的文本框先提交或丢弃、OCR 请求中的结果丢弃（用 session id 校验）、保存对话框打开时再触发（忽略，等对话框结束）。
 5. 事件走 `AppEvent::StartScreenshot`，`logic` 里判断「有会话 → 替换；无会话 → 新建」。无需跨视口回传，M0 已验证的唤醒方式照用。
+
+### 9.4 决策更新：目录结构与 egui 版本（M1.5）
+
+- **前端与 Tauri 壳已删除**，根目录即 egui 应用：根 `Cargo.toml` 为应用 crate（`src/`），`crates/mymac-core` 为 workspace 成员。旧实现的快照放在 `docs/legacy-reference/`，M5 重写覆盖层时对照。
+- **UI 改为 shadcn/ui 风格**：采用 `shadcn-egui 0.4.0`（MIT，Button/Badge/Input/Card/Tabs/Switch/Checkbox/Select/Slider/Tooltip/Popover/Dialog 等），图标用它自带的 Lucide，**不再使用 egui-phosphor**。
+- **egui 降到 0.34**：shadcn-egui 要求 egui 0.34，因此 `eframe =0.34.1`（锁文件解析为 egui 0.34.3）。eframe 0.34 同样有 `logic`/`ui` 拆分，M0 的唤醒机制（`request_repaint_of(ROOT)`）原样适用。升级路径：待 shadcn-egui 跟进后一起升。
+- **缺口需自补**：库没有 Table / Progress / Textarea / Toast / Dropdown；表格用 `egui_extras`，进度条与滚动区用 egui 自带控件按 shadcn 色板包装。Inter 不含中文，中文走系统 PingFang 回退（`src/theme.rs`，已验证深浅主题下渲染正常）。
+- **第 5 节依赖表以本节为准**：`eframe` 为 `=0.34.1`，不再有 `egui-phosphor`，新增 `shadcn-egui =0.4.0`。

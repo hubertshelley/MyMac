@@ -16,24 +16,18 @@
 8. **截图、OCR 与贴图**：全局快捷键/状态栏呼出截图，智能识别应用窗口快速框选，支持选区调整、矩形/箭头/文本标注与颜色设置，支持离线识别中英文文字，可保存文件、复制粘贴板或贴图置顶到桌面。
 
 ## 技术选型
-
 | 层次 | 技术 |
 | ---- | ---- |
-| 桌面框架 | Tauri 2.x |
-| 后端语言 | Rust |
-| 前端框架 | Vue 3 + TypeScript |
-| 构建工具 | Vite |
-| UI 组件 | shadcn-vue + Tailwind CSS |
-| 包管理 | yarn |
+| 应用框架 | Rust + eframe/egui 0.34（wgpu/Metal） |
+| UI 设计体系 | shadcn-egui 0.4.0（shadcn/ui 风格，Lucide 图标） |
+| 托盘与快捷键 | tray-icon + muda + global-hotkey |
+| 业务内核 | crates/mymac-core（不依赖 UI 框架） |
 | 资源采集 | sysinfo |
-| 系统交互 | launchctl / NSWorkspace / 文件系统 |
-
+| 系统交互 | launchctl / NSWorkspace / 文件系统 / objc2 |
 ## 架构说明
-
-- **前端（Vue）**：负责界面展示与交互，通过 Tauri `invoke` 调用后端命令。
-- **后端（Rust）**：通过 Tauri command 暴露系统能力，封装资源采集、应用扫描、启动项管理等逻辑。
-- **状态栏（Tray）**：由 Rust 端创建菜单栏图标，动态更新资源占用文案，点击唤起主窗口。
-
+- **界面（egui）**：根应用实现 `eframe::App` 的 `logic`/`ui`；窗口隐藏时仅 `logic` 运行，托盘与 F1 事件在其中消费。
+- **内核（mymac-core）**：通过 `EventSink` 上报进度类事件，界面层决定如何消费与唤醒。
+- **状态栏（Tray）**：主线程创建，动态更新资源占用文案，点击唤起主窗口。
 ## 版本里程碑
 
 ### v0.1（基础雏形）

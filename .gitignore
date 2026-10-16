@@ -33,3 +33,6 @@ dist-ssr
 # egui PoC 的 .app 包是构建产物（含 13MB 二进制），不入库
 poc/egui-poc/*.app/
 poc/egui-poc/target/
+
+# 开发打包产物
+/build/

@@ -74,8 +74,10 @@
 方案见 `docs/egui-migration.md`，分支 `feature/egui-rewrite`。
 
 - [x] M0 技术验证（`poc/egui-poc`）：托盘、F1、覆盖层、Dock 显隐、中文与图标渲染均通过
-- [ ] M1 core 抽离：建 workspace，业务模块迁入 `mymac-core`，去掉 Tauri 类型，Tauri 版暂时依赖 core 继续可用
-- [ ] M2 应用骨架 / M3 管理页面 / M4 Homebrew
+- [x] M1 core 抽离：业务模块迁入 `crates/mymac-core`，去掉 Tauri 类型
+- [x] M1.5 删除 Vue 前端与 Tauri 壳，根目录改为 egui 应用，eframe 降至 0.34，接入 shadcn-egui（主题、中文字体、深浅切换已验证；托盘与 F1 待真人复验）
+- [ ] M2 应用骨架（侧边栏导航、托盘菜单完整、状态栏图标 2 秒刷新）
+- [ ] M3 管理页面 / M4 Homebrew
 - [ ] M5 截图：新增两项需求（依赖 M5 覆盖层，详见 `docs/requirements.md` 第 9 节）
   - [ ] 整屏截图：悬停无窗口区域高亮整屏，单击选中整屏
   - [ ] 重复触发：覆盖层任意状态下再触发，重新抓屏，新背景含现有选区与标注，替换旧会话
