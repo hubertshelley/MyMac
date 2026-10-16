@@ -59,10 +59,8 @@ fn recognize_file(path: &std::path::Path) -> Result<OcrResult, String> {
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);
     request.setUsesLanguageCorrection(true);
     request.setAutomaticallyDetectsLanguage(true);
-    let languages = NSArray::from_retained_slice(&[
-        NSString::from_str("zh-Hans"),
-        NSString::from_str("en-US"),
-    ]);
+    let languages =
+        NSArray::from_retained_slice(&[NSString::from_str("zh-Hans"), NSString::from_str("en-US")]);
     request.setRecognitionLanguages(&languages);
 
     // 创建图像请求处理器（options 传空字典）
@@ -131,18 +129,10 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     use image::ImageEncoder;
 
     let mut cursor = std::io::Cursor::new(Vec::new());
-    let encoder = PngEncoder::new_with_quality(
-        &mut cursor,
-        CompressionType::Fast,
-        FilterType::NoFilter,
-    );
+    let encoder =
+        PngEncoder::new_with_quality(&mut cursor, CompressionType::Fast, FilterType::NoFilter);
     encoder
-        .write_image(
-            rgba,
-            width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        )
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|e| format!("PNG 编码失败：{e}"))?;
     Ok(cursor.into_inner())
 }

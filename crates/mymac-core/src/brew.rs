@@ -1,8 +1,8 @@
+use crate::event::{AppEvent, EventSink};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::PathBuf, process::Command};
-use crate::event::{AppEvent, EventSink};
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrewSource {
     #[default]
@@ -11,29 +11,50 @@ pub enum BrewSource {
     Ustc,
 }
 
+impl BrewSource {
+    /// 界面下拉框文案（顺序与 `SOURCE_OPTIONS` 一致）。
+    pub fn label(self) -> &'static str {
+        match self {
+            BrewSource::Official => "官方源",
+            BrewSource::Tsinghua => "清华大学",
+            BrewSource::Ustc => "中科大",
+        }
+    }
+
+    pub const ALL: [BrewSource; 3] = [BrewSource::Official, BrewSource::Tsinghua, BrewSource::Ustc];
+}
+
 #[derive(Default, Deserialize, Serialize)]
 struct BrewConfig {
     source: BrewSource,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct BrewStatus {
-    installed: bool,
-    path: String,
-    version: String,
-    source: BrewSource,
+    pub installed: bool,
+    pub path: String,
+    pub version: String,
+    pub source: BrewSource,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BrewPackage {
-    name: String,
-    version: String,
-    kind: String,
-    installed: bool,
-    outdated: bool,
-    trusted: bool,
-    tap: Option<String>,
-    top_level: bool,
+    pub name: String,
+    pub version: String,
+    /// "formula" 或 "cask"
+    pub kind: String,
+    pub installed: bool,
+    pub outdated: bool,
+    pub trusted: bool,
+    pub tap: Option<String>,
+    pub top_level: bool,
+}
+
+impl BrewPackage {
+    /// 树/列表节点的稳定键："kind:name"。
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.kind, self.name)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -44,8 +65,8 @@ struct BrewTrust {
 
 #[derive(Serialize)]
 pub struct BrewOperationResult {
-    message: String,
-    output: String,
+    pub message: String,
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -1,7 +1,7 @@
+use crate::event::{AppEvent, EventSink};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use crate::event::{AppEvent, EventSink};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppInfo {
@@ -59,8 +59,14 @@ pub fn scan_app_related(app: AppInfo) -> Result<Vec<AppRelatedItem>, String> {
     let mut seen = HashSet::from([app_path]);
 
     let exact_candidates = [
-        (library.join("Application Support").join(&app.name), "应用数据"),
-        (library.join("Application Support").join(&app.id), "应用数据"),
+        (
+            library.join("Application Support").join(&app.name),
+            "应用数据",
+        ),
+        (
+            library.join("Application Support").join(&app.id),
+            "应用数据",
+        ),
         (library.join("Caches").join(&app.id), "缓存"),
         (library.join("Caches").join(&app.name), "缓存"),
         (library.join("Containers").join(&app.id), "容器数据"),
@@ -74,7 +80,9 @@ pub fn scan_app_related(app: AppInfo) -> Result<Vec<AppRelatedItem>, String> {
             "保存状态",
         ),
         (
-            library.join("Preferences").join(format!("{}.plist", app.id)),
+            library
+                .join("Preferences")
+                .join(format!("{}.plist", app.id)),
             "偏好设置",
         ),
     ];
@@ -245,7 +253,8 @@ fn normalize_key(value: &str) -> String {
 fn is_removable_app(path: &Path) -> bool {
     path.exists()
         && path.extension().is_some_and(|extension| extension == "app")
-        && (path.starts_with("/Applications") || user_app_dir().is_some_and(|dir| path.starts_with(dir)))
+        && (path.starts_with("/Applications")
+            || user_app_dir().is_some_and(|dir| path.starts_with(dir)))
 }
 
 fn is_allowed_delete_path(path: &Path) -> bool {

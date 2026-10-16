@@ -109,7 +109,10 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> RgbaIcon 
         segments.push(Segment::Logo);
     }
     if config.show_cpu {
-        segments.push(Segment::Metric(Metric::Cpu, format!("{:.0}%", info.cpu_usage)));
+        segments.push(Segment::Metric(
+            Metric::Cpu,
+            format!("{:.0}%", info.cpu_usage),
+        ));
     }
     if config.show_memory {
         segments.push(Segment::Metric(
@@ -311,14 +314,15 @@ fn draw_text_at(
     color: u8,
 ) {
     let font = font();
-    let line_metrics = font.vertical_line_metrics(font_size).unwrap_or(LineMetrics {
-        ascent: font_size * 0.8,
-        descent: -font_size * 0.2,
-        line_gap: 0.0,
-        new_line_size: font_size,
-    });
-    let baseline_y =
-        (top + bottom + line_metrics.ascent + line_metrics.descent) / 2.0;
+    let line_metrics = font
+        .vertical_line_metrics(font_size)
+        .unwrap_or(LineMetrics {
+            ascent: font_size * 0.8,
+            descent: -font_size * 0.2,
+            line_gap: 0.0,
+            new_line_size: font_size,
+        });
+    let baseline_y = (top + bottom + line_metrics.ascent + line_metrics.descent) / 2.0;
 
     let mut pen_x = x as f32;
     for ch in text.chars() {

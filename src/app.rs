@@ -30,6 +30,7 @@ pub struct MyMacApp {
     clipboard: views::clipboard::ClipboardView,
     settings: views::settings::SettingsView,
     totp: views::totp::TotpView,
+    brew: views::brew::BrewView,
     /// 正在退出：此时窗口的关闭请求要放行，不能再当成「关闭 = 隐藏」拦截
     quitting: bool,
 }
@@ -49,6 +50,7 @@ impl MyMacApp {
             clipboard: views::clipboard::ClipboardView::new(),
             settings: views::settings::SettingsView::new(),
             totp,
+            brew: views::brew::BrewView::new(),
             quitting: false,
         }
     }
@@ -139,8 +141,8 @@ impl eframe::App for MyMacApp {
                 Page::Clipboard => self.clipboard.show(ui, &self.shared.clipboard),
                 Page::Settings => self.settings.show(ui, &self.shared),
                 Page::Totp => self.totp.show(ui),
+                Page::Brew => self.brew.show(ui),
                 Page::Launch => self.launch.show(ui),
-                page => views::placeholder::show(ui, page),
             });
     }
 }

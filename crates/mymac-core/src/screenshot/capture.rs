@@ -125,11 +125,8 @@ pub fn encode_png(rgba: Vec<u8>, width: usize, height: usize) -> Result<Vec<u8>,
     use image::ImageEncoder;
 
     let mut cursor = std::io::Cursor::new(Vec::new());
-    let encoder = PngEncoder::new_with_quality(
-        &mut cursor,
-        CompressionType::Fast,
-        FilterType::NoFilter,
-    );
+    let encoder =
+        PngEncoder::new_with_quality(&mut cursor, CompressionType::Fast, FilterType::NoFilter);
     encoder
         .write_image(
             &rgba,
@@ -190,8 +187,7 @@ mod tests {
         let mut raw = vec![0u8; 16 * 2];
         for row in 0..2 {
             let base = row * 16;
-            raw[base..base + 12]
-                .copy_from_slice(&[1, 2, 3, 255, 5, 6, 7, 255, 9, 10, 11, 255]);
+            raw[base..base + 12].copy_from_slice(&[1, 2, 3, 255, 5, 6, 7, 255, 9, 10, 11, 255]);
         }
         let rgba = bgra_to_rgba(&raw, 3, 2, 16).expect("转换应成功");
         assert_eq!(rgba.len(), 3 * 2 * 4);

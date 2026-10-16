@@ -129,12 +129,17 @@ fn save_image_files(
     image::save_buffer(&orig_path, rgba, width, height, image::ColorType::Rgba8)
         .map_err(|e| e.to_string())?;
 
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
-        .ok_or("图片数据无效")?;
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("图片数据无效")?;
     let (tw, th) = if width >= height {
-        (THUMB_MAX, ((height as u64 * THUMB_MAX as u64) / width as u64) as u32)
+        (
+            THUMB_MAX,
+            ((height as u64 * THUMB_MAX as u64) / width as u64) as u32,
+        )
     } else {
-        (((width as u64 * THUMB_MAX as u64) / height as u64) as u32, THUMB_MAX)
+        (
+            ((width as u64 * THUMB_MAX as u64) / height as u64) as u32,
+            THUMB_MAX,
+        )
     };
     let thumb = image::imageops::resize(
         &img,
@@ -302,7 +307,8 @@ pub fn copy_to_clipboard_and_top(state: &ClipboardState, id: &str) -> Result<(),
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     match item.kind {
         ClipKind::Text => {
-            cb.set_text(item.content.clone()).map_err(|e| e.to_string())?;
+            cb.set_text(item.content.clone())
+                .map_err(|e| e.to_string())?;
             *state.last_seen.lock().unwrap() = Some(fingerprint_text(&item.content));
         }
         ClipKind::Image => {
@@ -441,7 +447,9 @@ pub fn get_clip_history(state: &ClipboardState) -> Vec<ClipItemView> {
 /// 读取图片记录的原图 PNG 字节（界面层转纹理用）。
 pub fn clip_image_png(state: &ClipboardState, id: &str) -> Option<Vec<u8>> {
     let items = state.items.lock().unwrap();
-    let item = items.iter().find(|i| i.id == id && i.kind == ClipKind::Image)?;
+    let item = items
+        .iter()
+        .find(|i| i.id == id && i.kind == ClipKind::Image)?;
     let file = item.image_file.as_ref()?;
     std::fs::read(images_dir().join(file)).ok()
 }
@@ -449,7 +457,9 @@ pub fn clip_image_png(state: &ClipboardState, id: &str) -> Option<Vec<u8>> {
 /// 获取图片记录的原图 data URL
 pub fn get_clip_image(state: &ClipboardState, id: String) -> Option<String> {
     let items = state.items.lock().unwrap();
-    let item = items.iter().find(|i| i.id == id && i.kind == ClipKind::Image)?;
+    let item = items
+        .iter()
+        .find(|i| i.id == id && i.kind == ClipKind::Image)?;
     let file = item.image_file.as_ref()?;
     let bytes = std::fs::read(images_dir().join(file)).ok()?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
