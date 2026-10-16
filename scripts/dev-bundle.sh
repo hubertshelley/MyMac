@@ -35,12 +35,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # 用 Developer ID 签名：身份稳定，钥匙串授权一次后跨重建有效；
-# 找不到证书时回退 ad-hoc（钥匙串类功能会重新要求授权）。
-if security find-identity -v -p codesigning | grep -q "Developer ID Application"; then
-    IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
-    codesign --force --deep -o runtime -s "$IDENTITY" "$APP" >/dev/null 2>&1 || codesign --force --deep -s - "$APP" >/dev/null 2>&1
+# 失败时回退 ad-hoc 并大声警告（ad-hoc 每次构建身份都变，钥匙串会反复弹授权）。
+# 注意：Developer ID 必须能访问 Apple 时间戳服务器，沙箱/断网环境会失败。
+IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+if [ -n "${IDENTITY:-}" ]; then
+    if codesign --force --timestamp -o runtime -s "$IDENTITY" "$APP" 2>/dev/null; then
+        echo "已用 Developer ID 签名：$IDENTITY"
+    else
+        echo "⚠️  Developer ID 签名失败（无法访问时间戳服务？），已回退 ad-hoc。" >&2
+        echo "⚠️  ad-hoc 身份每次构建都会变，钥匙串将要求重新授权；请在联网的本地终端重跑本脚本。" >&2
+        codesign --force -s - "$APP"
+    fi
 else
-    codesign --force --deep -s - "$APP" >/dev/null 2>&1
+    echo "⚠️  未找到 Developer ID 证书，已回退 ad-hoc（钥匙串会反复要求授权）。" >&2
+    codesign --force -s - "$APP"
 fi
 
 # 重建 .app 会让 LaunchServices 丢失注册，导致 open / desktop_app 按 bundle id 找不到

@@ -87,13 +87,14 @@ impl TotpView {
 
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        // 每秒刷新验证码
+        // 每秒刷新验证码；重绘固定 500ms 一拍，保证倒计时/进度条按秒平滑走。
+        // （重绘若与数据刷新绑在一起，会被托盘 2 秒采样的节拍合并成 2 秒一跳。）
         if self.accounts_at.is_none()
             || self.accounts_at.unwrap().elapsed() >= Duration::from_secs(1)
         {
             self.refresh();
-            ctx.request_repaint_after(Duration::from_secs(1));
         }
+        ctx.request_repaint_after(Duration::from_millis(500));
 
         // 后台动作结果
         if let Some((job, task)) = &self.task {
@@ -137,7 +138,24 @@ impl TotpView {
 
         let palette = Theme::current(&ctx).palette;
         let muted = palette.muted_foreground;
-        ui.heading("2FA 验证码");
+        // 标题行：标题 + 右侧「添加账户」（按钮必须包在 horizontal 里，否则
+        // right_to_left 布局会占用剩余全部高度，把内容挤出可视区）
+        ui.horizontal(|ui| {
+            ui.heading("2FA 验证码");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(
+                        Button::new("添加账户")
+                            .size(ButtonSize::Sm)
+                            .icon(&lucide::PLUS),
+                    )
+                    .clicked()
+                {
+                    self.error = None;
+                    self.add_open = true;
+                }
+            });
+        });
         ui.add_space(4.0);
         ui.label(RichText::new("管理 TOTP 账户，点击验证码即可复制。").color(muted));
         if let Some(error) = &self.load_error {
@@ -156,20 +174,7 @@ impl TotpView {
                 });
         }
 
-        // 工具栏：右侧「添加账户」
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(
-                    Button::new("添加账户")
-                        .size(ButtonSize::Sm)
-                        .icon(&lucide::PLUS),
-                )
-                .clicked()
-            {
-                self.error = None;
-                self.add_open = true;
-            }
-        });
+        // 工具栏：右侧「添加账户」已并入标题行
         ui.add_space(12.0);
 
         self.account_grid(ui, &ctx, muted);
@@ -181,97 +186,102 @@ impl TotpView {
         let mut copy: Option<String> = None;
         let mut confirm_delete: Option<String> = None;
 
-        if self.accounts.is_empty() {
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 120.0),
-                egui::Sense::hover(),
-            );
-            ui.painter().rect_stroke(
-                rect,
-                10,
-                egui::Stroke::new(1.0_f32, muted),
-                egui::StrokeKind::Outside,
-            );
-            let icon = &lucide::KEY_ROUND;
-            let icon_rect = egui::Rect::from_center_size(
-                rect.center_top() + egui::vec2(0.0, 36.0),
-                egui::vec2(28.0, 28.0),
-            );
-            paint_icon(
-                ui.painter(),
-                icon_rect,
-                icon,
-                muted,
-                Theme::current(ctx).metrics.icon_stroke,
-            );
-            ui.painter().text(
-                rect.center() + egui::vec2(0.0, 28.0),
-                egui::Align2::CENTER_CENTER,
-                "暂无 2FA 账户",
-                egui::FontId::proportional(14.0),
-                muted,
-            );
-        } else {
-            egui::Grid::new("totp_cards")
-                .num_columns(2)
-                .spacing([12.0, 12.0])
-                .min_col_width((ui.available_width() - 12.0) / 2.0)
-                .show(ui, |ui| {
-                    // card_content 需要 &mut self（悬停操作等），用快照避免借用冲突
-                    let snapshot = self.accounts.clone();
-                    for (n, account) in snapshot.iter().enumerate() {
-                        if n > 0 && n % 2 == 0 {
-                            ui.end_row();
-                        }
-                        let card_rect = layout::card(ui, |ui| {
-                            self.card_content(
-                                ui,
-                                ctx,
-                                account,
-                                muted,
-                                &mut copy,
-                                &mut confirm_delete,
-                            );
-                            ui.min_rect()
+        egui::ScrollArea::vertical()
+            .id_salt("totp_cards_scroll")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                if self.accounts.is_empty() {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 120.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        10,
+                        egui::Stroke::new(1.0_f32, muted),
+                        egui::StrokeKind::Outside,
+                    );
+                    let icon = &lucide::KEY_ROUND;
+                    let icon_rect = egui::Rect::from_center_size(
+                        rect.center_top() + egui::vec2(0.0, 36.0),
+                        egui::vec2(28.0, 28.0),
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        icon_rect,
+                        icon,
+                        muted,
+                        Theme::current(ctx).metrics.icon_stroke,
+                    );
+                    ui.painter().text(
+                        rect.center() + egui::vec2(0.0, 28.0),
+                        egui::Align2::CENTER_CENTER,
+                        "暂无 2FA 账户",
+                        egui::FontId::proportional(14.0),
+                        muted,
+                    );
+                } else {
+                    egui::Grid::new("totp_cards")
+                        .num_columns(2)
+                        .spacing([12.0, 12.0])
+                        .min_col_width((ui.available_width() - 12.0) / 2.0)
+                        .show(ui, |ui| {
+                            // card_content 需要 &mut self（悬停操作等），用快照避免借用冲突
+                            let snapshot = self.accounts.clone();
+                            for (n, account) in snapshot.iter().enumerate() {
+                                if n > 0 && n % 2 == 0 {
+                                    ui.end_row();
+                                }
+                                let card_rect = layout::card(ui, |ui| {
+                                    self.card_content(
+                                        ui,
+                                        ctx,
+                                        account,
+                                        muted,
+                                        &mut copy,
+                                        &mut confirm_delete,
+                                    );
+                                    ui.min_rect()
+                                });
+                                // 点卡片即复制；同帧点了卡片内按钮（复制/删除/确认）则不触发
+                                let button_used = copy.is_some() || confirm_delete.is_some();
+                                if !button_used
+                                    && ui
+                                        .interact(
+                                            card_rect,
+                                            egui::Id::new(("totp_card", &account.id)),
+                                            egui::Sense::click(),
+                                        )
+                                        .clicked()
+                                {
+                                    copy = Some(account.id.clone());
+                                }
+                            }
                         });
-                        // 点卡片即复制；同帧点了卡片内按钮（复制/删除/确认）则不触发
-                        let button_used = copy.is_some() || confirm_delete.is_some();
-                        if !button_used
-                            && ui
-                                .interact(
-                                    card_rect,
-                                    egui::Id::new(("totp_card", &account.id)),
-                                    egui::Sense::click(),
-                                )
-                                .clicked()
-                        {
-                            copy = Some(account.id.clone());
-                        }
-                    }
-                });
-        }
+                }
 
-        if let Some(id) = copy {
-            let totp_state = self.totp_state.clone();
-            let clip_state = self.clip_state.clone();
-            self.error = None;
-            self.task = Some((
-                Job::Copy,
-                Task::spawn(ctx, move || {
-                    totp::copy_totp_code(&totp_state, &clip_state, id)
-                }),
-            ));
-        }
-        if let Some(id) = confirm_delete {
-            let state = self.totp_state.clone();
-            self.error = None;
-            self.task = Some((
-                Job::Delete,
-                Task::spawn(ctx, move || {
-                    totp::delete_totp_account(&state, id).map(|_| String::new())
-                }),
-            ));
-        }
+                if let Some(id) = copy {
+                    let totp_state = self.totp_state.clone();
+                    let clip_state = self.clip_state.clone();
+                    self.error = None;
+                    self.task = Some((
+                        Job::Copy,
+                        Task::spawn(ctx, move || {
+                            totp::copy_totp_code(&totp_state, &clip_state, id)
+                        }),
+                    ));
+                }
+                if let Some(id) = confirm_delete {
+                    let state = self.totp_state.clone();
+                    self.error = None;
+                    self.task = Some((
+                        Job::Delete,
+                        Task::spawn(ctx, move || {
+                            totp::delete_totp_account(&state, id).map(|_| String::new())
+                        }),
+                    ));
+                }
+            });
     }
 
     #[allow(clippy::too_many_arguments)]
