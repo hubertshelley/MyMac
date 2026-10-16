@@ -50,8 +50,7 @@ fn legacy_accounts_path() -> PathBuf {
 }
 
 fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYRING_SERVICE, account)
-        .map_err(|e| format!("无法访问 macOS 钥匙串：{e}"))
+    keyring::Entry::new(KEYRING_SERVICE, account).map_err(|e| format!("无法访问 macOS 钥匙串：{e}"))
 }
 
 fn load_secret_vault() -> Result<Option<HashMap<String, String>>, String> {
@@ -84,7 +83,9 @@ fn read_legacy_secret(id: &str) -> Result<String, String> {
         .map_err(|e| format!("无法读取旧钥匙串项目：{e}"))
 }
 
-fn migrate_per_account_keyring(accounts: &[TotpAccount]) -> Result<HashMap<String, String>, String> {
+fn migrate_per_account_keyring(
+    accounts: &[TotpAccount],
+) -> Result<HashMap<String, String>, String> {
     let mut vault = HashMap::new();
     for account in accounts {
         vault.insert(account.id.clone(), read_legacy_secret(&account.id)?);
@@ -99,36 +100,59 @@ fn migrate_per_account_keyring(accounts: &[TotpAccount]) -> Result<HashMap<Strin
 }
 
 pub fn load_accounts() -> Vec<TotpAccount> {
+    load_accounts_with_error().0
+}
+
+/// 返回 (账户列表, 错误信息)。列表尽量完整，错误供界面提示。
+pub fn load_accounts_with_error() -> (Vec<TotpAccount>, Option<String>) {
     match load_accounts_inner() {
-        Ok(accounts) => accounts,
-        Err(e) => {
+        Ok(accounts) => (accounts, None),
+        Err((accounts, e)) => {
             eprintln!("2FA 账户加载失败：{e}");
-            Vec::new()
+            (accounts, Some(e))
         }
     }
 }
 
-fn load_accounts_inner() -> Result<Vec<TotpAccount>, String> {
+/// 部分失败时的结果：账户尽量保留（密钥可能为空），错误信息供界面提示。
+type LoadResult = Result<Vec<TotpAccount>, (Vec<TotpAccount>, String)>;
+
+fn load_accounts_inner() -> LoadResult {
     let path = accounts_path();
     if !path.exists() && legacy_accounts_path().exists() {
-        migrate_legacy_accounts()?;
+        migrate_legacy_accounts().map_err(|e| (Vec::new(), e))?;
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err((Vec::new(), e.to_string())),
     };
-    let mut accounts: Vec<TotpAccount> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let vault = match load_secret_vault()? {
-        Some(vault) => vault,
-        None if accounts.is_empty() => HashMap::new(),
-        None => migrate_per_account_keyring(&accounts)?,
+    let mut accounts: Vec<TotpAccount> =
+        serde_json::from_str(&content).map_err(|e| (Vec::new(), e.to_string()))?;
+    let vault = match load_secret_vault() {
+        Ok(Some(vault)) => vault,
+        Ok(None) if accounts.is_empty() => HashMap::new(),
+        Ok(None) => match migrate_per_account_keyring(&accounts) {
+            Ok(vault) => vault,
+            Err(e) => return Err((accounts, e)),
+        },
+        // 钥匙串读取失败（签名身份变化 / 未授权）：账户名仍来自本地 JSON，
+        // 密钥留空，由界面提示。授权恢复后重启应用即可正常生成验证码。
+        Err(e) => return Err((accounts, format!("钥匙串读取失败：{e}"))),
     };
+    let mut missing = Vec::new();
     for account in &mut accounts {
-        account.secret = vault
-            .get(&account.id)
-            .cloned()
-            .ok_or_else(|| format!("账户“{}”的密钥不存在", account.name))?;
+        if let Some(secret) = vault.get(&account.id) {
+            account.secret = secret.clone();
+        } else {
+            missing.push(account.name.clone());
+        }
+    }
+    if !missing.is_empty() {
+        return Err((
+            accounts,
+            format!("部分账户密钥不存在：{}", missing.join("、")),
+        ));
     }
     Ok(accounts)
 }
@@ -143,11 +167,8 @@ fn migrate_legacy_accounts() -> Result<(), String> {
         .collect();
     save_secret_vault(&vault)?;
     if let Err(e) = save_accounts(&accounts) {
-        let _ = keyring_entry(KEYRING_VAULT_ACCOUNT).and_then(|entry| {
-            entry
-                .delete_credential()
-                .map_err(|error| error.to_string())
-        });
+        let _ = keyring_entry(KEYRING_VAULT_ACCOUNT)
+            .and_then(|entry| entry.delete_credential().map_err(|error| error.to_string()));
         return Err(e);
     }
     std::fs::remove_file(&legacy_path).map_err(|e| format!("迁移完成但无法删除旧密钥文件：{e}"))?;
@@ -252,7 +273,7 @@ fn parse_otpauth(input: &str) -> Result<(String, String, String, u32, u64), Stri
             "digits" => digits = value.parse().map_err(|_| "验证码位数无效".to_string())?,
             "period" => period = value.parse().map_err(|_| "刷新周期无效".to_string())?,
             "algorithm" if !value.eq_ignore_ascii_case("SHA1") => {
-                return Err("当前仅支持 SHA1 算法".to_string())
+                return Err("当前仅支持 SHA1 算法".to_string());
             }
             _ => {}
         }
@@ -371,15 +392,49 @@ pub fn decode_totp_qr_clipboard() -> Result<String, String> {
     decode_qr_image(cursor.get_ref())
 }
 
-pub fn get_totp_accounts(state: &TotpState) -> Result<Vec<TotpAccountView>, String> {
+/// 账户总览：所有账户（验证码生成失败的用占位码）+ 聚合错误。
+#[derive(Default)]
+pub struct TotpOverview {
+    pub accounts: Vec<TotpAccountView>,
+    pub error: Option<String>,
+}
+
+pub fn get_totp_accounts(state: &TotpState) -> TotpOverview {
     let now = timestamp();
-    state
-        .accounts
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|a| view(a, now))
-        .collect()
+    let mut overview = TotpOverview::default();
+    for account in state.accounts.lock().unwrap().iter() {
+        // 密钥为空（钥匙串未授权等）直接用占位，避免空密钥算出无效验证码
+        if account.secret.is_empty() {
+            overview.accounts.push(view_placeholder(account, now));
+            if overview.error.is_none() {
+                overview.error = Some(format!("账户「{}」密钥不可用", account.name));
+            }
+            continue;
+        }
+        match view(account, now) {
+            Ok(v) => overview.accounts.push(v),
+            Err(e) => {
+                if overview.error.is_none() {
+                    overview.error = Some(e);
+                }
+                // 占位视图：名字照常显示，验证码用占位符
+                overview.accounts.push(view_placeholder(account, now));
+            }
+        }
+    }
+    overview
+}
+
+fn view_placeholder(account: &TotpAccount, now: u64) -> TotpAccountView {
+    TotpAccountView {
+        id: account.id.clone(),
+        name: account.name.clone(),
+        issuer: account.issuer.clone(),
+        digits: account.digits,
+        period: account.period,
+        code: "-".repeat(account.digits as usize),
+        remaining: account.period.saturating_sub(now % account.period),
+    }
 }
 
 pub fn add_totp_account(

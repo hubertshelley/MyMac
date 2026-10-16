@@ -34,7 +34,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep -s - "$APP" >/dev/null 2>&1
+# 用 Developer ID 签名：身份稳定，钥匙串授权一次后跨重建有效；
+# 找不到证书时回退 ad-hoc（钥匙串类功能会重新要求授权）。
+if security find-identity -v -p codesigning | grep -q "Developer ID Application"; then
+    IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+    codesign --force --deep -o runtime -s "$IDENTITY" "$APP" >/dev/null 2>&1 || codesign --force --deep -s - "$APP" >/dev/null 2>&1
+else
+    codesign --force --deep -s - "$APP" >/dev/null 2>&1
+fi
 
 # 重建 .app 会让 LaunchServices 丢失注册，导致 open / desktop_app 按 bundle id 找不到
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister

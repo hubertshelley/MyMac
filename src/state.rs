@@ -28,6 +28,7 @@ impl Shared {
                 // 启动时不读取剪贴板内容，避免触发通用剪贴板按需取回
                 last_seen: Mutex::new(None),
             }),
+            // 账户列表尽量完整（密钥可能为空），错误由 2FA 页提示
             totp: Arc::new(TotpState {
                 accounts: Mutex::new(totp::load_accounts()),
             }),

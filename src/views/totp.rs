@@ -32,6 +32,8 @@ pub struct TotpView {
     totp_state: Arc<TotpState>,
     clip_state: Arc<ClipboardState>,
     accounts: Vec<TotpAccountView>,
+    /// 数据加载层的常驻错误（钥匙串未授权等）
+    load_error: Option<String>,
     accounts_at: Option<Instant>,
     /// 添加账户弹窗是否打开
     add_open: bool,
@@ -53,6 +55,7 @@ impl TotpView {
             totp_state,
             clip_state,
             accounts: Vec::new(),
+            load_error: None,
             accounts_at: None,
             add_open: false,
             name: String::new(),
@@ -73,7 +76,12 @@ impl TotpView {
 
     fn refresh(&mut self) {
         let state = self.totp_state.clone();
-        self.accounts = totp::get_totp_accounts(&state).unwrap_or_default();
+        let overview = totp::get_totp_accounts(&state);
+        self.accounts = overview.accounts;
+        // 钥匙串等错误在页头常驻提示（每秒刷新时保持，不覆盖表单错误）
+        if self.load_error.is_none() {
+            self.load_error = overview.error;
+        }
         self.accounts_at = Some(Instant::now());
     }
 
@@ -132,6 +140,21 @@ impl TotpView {
         ui.heading("2FA 验证码");
         ui.add_space(4.0);
         ui.label(RichText::new("管理 TOTP 账户，点击验证码即可复制。").color(muted));
+        if let Some(error) = &self.load_error {
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(palette.destructive_foreground.gamma_multiply(0.1))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(12, 6))
+                .stroke(egui::Stroke::new(1.0_f32, palette.destructive))
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        palette.destructive,
+                        RichText::new(format!("{error}（验证码暂不可用；授权后重启应用即可恢复）"))
+                            .small(),
+                    );
+                });
+        }
 
         // 工具栏：右侧「添加账户」
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
