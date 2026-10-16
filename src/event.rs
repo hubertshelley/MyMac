@@ -1,4 +1,4 @@
-//! 界面层事件：托盘菜单、全局快捷键等外部来源 → 主界面。
+//! 界面层事件：托盘菜单、全局快捷键、后台线程 → 主界面。
 //!
 //! 唤醒规则（M0 验证）：必须 `request_repaint_of(ViewportId::ROOT)`。
 //! `App::logic` 只在根视口执行，从子视口回调里用 `request_repaint()` 只会重绘子视口。
@@ -8,11 +8,21 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::nav::Page;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEvent {
     ShowMainWindow,
+    /// 显示主窗口并切到指定页面（如托盘「管理 2FA」）
+    Navigate(Page),
     /// 启动 / 重复触发截图（覆盖层存在时重新抓屏并替换会话）
     StartScreenshot,
+    /// 后台线程完成一次系统采样（每 2 秒），主线程据此刷新托盘
+    SystemSampled,
+    /// 粘贴板历史变化（来自监听线程或托盘操作）
+    ClipboardChanged,
+    /// 状态栏 2FA 复制结果（成功时携带账户 id）
+    TotpCopied(Result<String, String>),
     Quit,
 }
 

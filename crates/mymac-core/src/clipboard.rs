@@ -464,3 +464,86 @@ pub fn clear_clip_history(state: &ClipboardState) -> Result<(), String> {
 pub fn copy_clip_item(state: &ClipboardState, id: String) -> Result<(), String> {
     copy_to_clipboard_and_top(state, &id)
 }
+/// 读取剪贴板新内容并写入历史。返回 true 表示历史发生了变化。
+///
+/// 仅在剪贴板确实变化并稳定后调用：优先文本，无文本时读取图片；
+/// 图片先用指纹快速去重，避免重复保存文件，解码与缩略图生成在锁外完成。
+pub fn capture_clipboard_change(state: &ClipboardState) -> bool {
+    let Ok(mut cb) = arboard::Clipboard::new() else {
+        return false;
+    };
+    let content = if let Ok(text) = cb.get_text() {
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(NewContent::Text(text))
+        }
+    } else if let Ok(img) = cb.get_image() {
+        if img.bytes.is_empty() {
+            None
+        } else {
+            let fp = image_fingerprint(img.width, img.height, &img.bytes);
+            let already_seen = state.last_seen.lock().unwrap().as_deref() == Some(fp.as_str());
+            if already_seen {
+                None
+            } else {
+                prepare_image(img.width as u32, img.height as u32, &img.bytes)
+                    .map(NewContent::Image)
+            }
+        }
+    } else {
+        None
+    };
+    let Some(content) = content else {
+        return false;
+    };
+
+    let mut items = state.items.lock().unwrap();
+    let mut last_seen = state.last_seen.lock().unwrap();
+    let changed = upsert(&mut items, content, &mut last_seen);
+    if changed {
+        let snapshot = items.clone();
+        drop(items);
+        let _ = save_history(&snapshot);
+    }
+    changed
+}
+
+/// 监听循环（阻塞，放在独立线程里跑）。
+///
+/// 只观察轻量的 changeCount；变化稳定后再读取；远程（通用剪贴板）内容先留给用户
+/// 实际粘贴，3 秒后若剪贴板仍未变化再单次读取。`on_changed` 在历史变化后回调。
+pub fn watch_clipboard(state: &ClipboardState, on_changed: impl Fn()) -> ! {
+    use std::time::Duration;
+
+    let mut last_change_count = clipboard_change_count();
+    loop {
+        let current = clipboard_change_count();
+        if current.is_some() && current == last_change_count {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        last_change_count = current;
+
+        // 通用剪贴板可能先发布占位项再异步取回内容，等变化稳定
+        loop {
+            std::thread::sleep(Duration::from_millis(350));
+            let observed = clipboard_change_count();
+            if observed == last_change_count {
+                break;
+            }
+            last_change_count = observed;
+        }
+        if is_remote_clipboard() {
+            let remote = last_change_count;
+            std::thread::sleep(Duration::from_secs(3));
+            if clipboard_change_count() != remote {
+                continue;
+            }
+        }
+        if capture_clipboard_change(state) {
+            on_changed();
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
