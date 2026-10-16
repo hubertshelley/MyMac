@@ -337,6 +337,18 @@ pub fn copy_to_clipboard_and_top(state: &ClipboardState, id: &str) -> Result<(),
     save_history(&items)
 }
 
+/// 把 RGBA 图片直接写入系统剪贴板（截图「复制」输出用）。
+/// 粘贴板监听线程会经 changeCount 自动收录这段内容。
+pub fn copy_image_to_clipboard(width: usize, height: usize, rgba: Vec<u8>) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let data = arboard::ImageData {
+        width,
+        height,
+        bytes: rgba.into(),
+    };
+    cb.set_image(data).map_err(|e| e.to_string())
+}
+
 /// 清空历史，并记录当前剪贴板指纹，防止残留内容被监听线程重新写入
 pub fn clear_history(state: &ClipboardState) -> Result<(), String> {
     *state.last_seen.lock().unwrap() = current_clipboard_fingerprint();

@@ -73,6 +73,24 @@ fn display_scale(display_id: u32, logical_width: f64) -> f64 {
     }
 }
 
+/// 抓屏的 RGBA 结果（供 egui 纹理直接上传，跳过 PNG 编码）。
+pub struct RgbaGrab {
+    pub rgba: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// 抓取指定显示器画面并转换为 RGBA（仅可在主线程调用）。
+pub fn grab_display_rgba(display_id: u32) -> Result<RgbaGrab, String> {
+    let grab = grab_display_raw(display_id)?;
+    let rgba = bgra_to_rgba(&grab.raw, grab.width, grab.height, grab.bytes_per_row)?;
+    Ok(RgbaGrab {
+        rgba,
+        width: grab.width,
+        height: grab.height,
+    })
+}
+
 /// 抓取指定显示器完整画面并编码为 PNG，返回 (PNG 字节, 物理宽, 物理高)
 pub fn grab_display_png(display_id: u32) -> Result<(Vec<u8>, u32, u32), String> {
     let grab = grab_display_raw(display_id)?;

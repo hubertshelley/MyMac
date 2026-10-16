@@ -12,6 +12,7 @@ mod fmt;
 mod hotkey;
 mod macos;
 mod nav;
+mod screenshot;
 mod state;
 mod task;
 mod theme;

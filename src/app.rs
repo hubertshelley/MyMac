@@ -11,6 +11,7 @@ use shadcn_egui::icons::lucide;
 use crate::event::{UiEvent, UiSink};
 use crate::macos;
 use crate::nav::Page;
+use crate::screenshot;
 use crate::state::Shared;
 use crate::theme::{self, Appearance};
 use crate::tray::Tray;
@@ -31,6 +32,7 @@ pub struct MyMacApp {
     settings: views::settings::SettingsView,
     totp: views::totp::TotpView,
     brew: views::brew::BrewView,
+    screenshot: screenshot::ScreenshotManager,
     /// 正在退出：此时窗口的关闭请求要放行，不能再当成「关闭 = 隐藏」拦截
     quitting: bool,
 }
@@ -51,6 +53,7 @@ impl MyMacApp {
             settings: views::settings::SettingsView::new(),
             totp,
             brew: views::brew::BrewView::new(),
+            screenshot: screenshot::ScreenshotManager::new(),
             quitting: false,
         }
     }
@@ -72,10 +75,7 @@ impl eframe::App for MyMacApp {
                     self.page = page;
                     Self::show_main_window(ctx);
                 }
-                UiEvent::StartScreenshot => {
-                    // M5：抓屏并显示/替换覆盖层。当前仅记录。
-                    log::info!("收到截图触发（M5 实现）");
-                }
+                UiEvent::StartScreenshot => self.screenshot.start(ctx),
                 UiEvent::SystemSampled => {
                     let info = self.shared.latest.lock().unwrap().clone();
                     if let Some(info) = info {
@@ -125,6 +125,9 @@ impl eframe::App for MyMacApp {
                     .inner_margin(egui::Margin::same(12)),
             )
             .show_inside(ui, |ui| self.sidebar(ui));
+
+        // 截图覆盖层视口（隐藏态注册；显隐由 ViewportCommand 驱动）
+        self.screenshot.register(ui);
 
         egui::CentralPanel::default()
             .frame(
