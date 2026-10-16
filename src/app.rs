@@ -26,6 +26,8 @@ pub struct MyMacApp {
     page: Page,
     appearance: Appearance,
     launch: views::launch::LaunchView,
+    /// 正在退出：此时窗口的关闭请求要放行，不能再当成「关闭 = 隐藏」拦截
+    quitting: bool,
 }
 
 impl MyMacApp {
@@ -38,6 +40,7 @@ impl MyMacApp {
             page: Page::default(),
             appearance: Appearance::default(),
             launch: views::launch::LaunchView::new(),
+            quitting: false,
         }
     }
 
@@ -74,7 +77,13 @@ impl eframe::App for MyMacApp {
                         log::error!("复制 2FA 验证码失败：{error}");
                     }
                 }
-                UiEvent::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                UiEvent::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    // Close 只是往视口事件队列里排一个 Close，要等下一轮 pass 才会被
+                    // eframe 读到并真正关闭；不主动请求重绘的话，要等下一次托盘/定时唤醒。
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
             }
         }
     }
@@ -83,7 +92,7 @@ impl eframe::App for MyMacApp {
         let ctx = ui.ctx().clone();
 
         // 关闭主窗口 = 隐藏窗口与 Dock 图标，托盘常驻
-        if ctx.input(|i| i.viewport().close_requested()) {
+        if !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             macos::set_dock_visible(false);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
