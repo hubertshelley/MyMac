@@ -1,11 +1,10 @@
 use fontdue::{Font, FontSettings, LineMetrics};
 use std::sync::OnceLock;
-use tauri::image::Image;
 
 use crate::config::StatusConfig;
 use crate::system::SystemInfo;
 
-/// 图标整体高度（2x，Tauri 会缩放到菜单栏标准 18pt 高）
+/// 图标整体高度（2x，托盘会缩放到菜单栏标准 18pt 高）
 const ICON_HEIGHT: u32 = 36;
 const FONT_SIZE: f32 = 24.0;
 const NETWORK_FONT_SIZE: f32 = 15.0;
@@ -47,7 +46,7 @@ fn font() -> &'static Font {
 fn icon_font() -> &'static Font {
     static ICON_FONT: OnceLock<Font> = OnceLock::new();
     ICON_FONT.get_or_init(|| {
-        let bytes = include_bytes!("../fonts/MaterialIcons-Regular.ttf");
+        let bytes = include_bytes!("../assets/MaterialIcons-Regular.ttf");
         Font::from_bytes(&bytes[..], FontSettings::default()).expect("图标字体解析失败")
     })
 }
@@ -67,7 +66,7 @@ fn is_dark_mode() -> bool {
 fn logo_rgba() -> &'static (Vec<u8>, u32, u32) {
     static LOGO: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
     LOGO.get_or_init(|| {
-        let bytes = include_bytes!("../icons/128x128.png");
+        let bytes = include_bytes!("../assets/logo-128.png");
         let img = image::load_from_memory(bytes).expect("Logo 解码失败");
         let img = img.resize_exact(
             LOGO_SIZE as u32,
@@ -94,7 +93,14 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
 }
 
 /// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 字体图标指标）
-pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'static> {
+/// RGBA 位图：宽、高与像素数据，由 UI 层转为托盘图标或纹理。
+pub struct RgbaIcon {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> RgbaIcon {
     let dark = is_dark_mode();
     let color = if dark { 255u8 } else { 0u8 };
 
@@ -182,7 +188,11 @@ pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> Image<'st
         }
     }
 
-    Image::new_owned(buf, width as u32, ICON_HEIGHT)
+    RgbaIcon {
+        rgba: buf,
+        width: width as u32,
+        height: ICON_HEIGHT,
+    }
 }
 
 fn text_width(text: &str) -> f32 {

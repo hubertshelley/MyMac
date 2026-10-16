@@ -206,8 +206,8 @@ mod tests {
     fn bgra_to_rgba_rejects_invalid_input() {
         assert!(bgra_to_rgba(&[], 0, 0, 0).is_err());
         // 数据长度不足
-        assert!(bgra_to_rgba(&vec![0u8; 10], 3, 2, 12).is_err());
+        assert!(bgra_to_rgba(&[0u8; 10], 3, 2, 12).is_err());
         // 行跨度小于像素宽度所需
-        assert!(bgra_to_rgba(&vec![0u8; 64], 4, 2, 8).is_err());
+        assert!(bgra_to_rgba(&[0u8; 64], 4, 2, 8).is_err());
     }
 }

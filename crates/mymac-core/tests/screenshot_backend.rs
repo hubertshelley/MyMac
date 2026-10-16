@@ -3,7 +3,7 @@
 
 #![cfg(target_os = "macos")]
 
-use mymac_lib::screenshot::{capture, winlist};
+use mymac_core::screenshot::{capture, winlist};
 
 #[test]
 fn active_displays_returns_valid_geometry() {

@@ -2360,6 +2360,26 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "chrono",
+ "image",
+ "mymac-core",
+ "objc2",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+]
+
+[[package]]
+name = "mymac-core"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "base64 0.22.1",
+ "chrono",
  "core-foundation 0.10.1",
  "core-graphics",
  "data-encoding",
@@ -2380,11 +2400,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
  "trash",
  "url",
 ]

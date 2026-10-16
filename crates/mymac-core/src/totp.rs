@@ -304,7 +304,6 @@ fn decode_qr_image(bytes: &[u8]) -> Result<String, String> {
     Err("未识别到有效的 2FA 二维码，请确保二维码清晰且完整".to_string())
 }
 
-#[tauri::command]
 pub fn decode_totp_qr_image(data: String) -> Result<String, String> {
     let encoded = data
         .split_once(',')
@@ -316,7 +315,6 @@ pub fn decode_totp_qr_image(data: String) -> Result<String, String> {
     decode_qr_image(&bytes)
 }
 
-#[tauri::command]
 pub fn capture_totp_qr() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -342,7 +340,6 @@ pub fn capture_totp_qr() -> Result<String, String> {
     }
 }
 
-#[tauri::command]
 pub fn decode_totp_qr_clipboard() -> Result<String, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     let image = clipboard
@@ -362,8 +359,7 @@ pub fn decode_totp_qr_clipboard() -> Result<String, String> {
     decode_qr_image(cursor.get_ref())
 }
 
-#[tauri::command]
-pub fn get_totp_accounts(state: tauri::State<TotpState>) -> Result<Vec<TotpAccountView>, String> {
+pub fn get_totp_accounts(state: &TotpState) -> Result<Vec<TotpAccountView>, String> {
     let now = timestamp();
     state
         .accounts
@@ -374,9 +370,8 @@ pub fn get_totp_accounts(state: tauri::State<TotpState>) -> Result<Vec<TotpAccou
         .collect()
 }
 
-#[tauri::command]
 pub fn add_totp_account(
-    state: tauri::State<TotpState>,
+    state: &TotpState,
     name: String,
     issuer: String,
     secret: String,
@@ -425,8 +420,7 @@ pub fn add_totp_account(
     Ok(result)
 }
 
-#[tauri::command]
-pub fn delete_totp_account(state: tauri::State<TotpState>, id: String) -> Result<(), String> {
+pub fn delete_totp_account(state: &TotpState, id: String) -> Result<(), String> {
     let mut accounts = state.accounts.lock().unwrap();
     let position = accounts
         .iter()
@@ -471,13 +465,12 @@ pub fn copy_code(
     Ok(code)
 }
 
-#[tauri::command]
 pub fn copy_totp_code(
-    totp_state: tauri::State<TotpState>,
-    clipboard_state: tauri::State<crate::clipboard::ClipboardState>,
+    totp_state: &TotpState,
+    clipboard_state: &crate::clipboard::ClipboardState,
     id: String,
 ) -> Result<String, String> {
-    copy_code(totp_state.inner(), clipboard_state.inner(), &id)
+    copy_code(totp_state, clipboard_state, &id)
 }
 
 pub fn menu_entries(state: &TotpState) -> Vec<(String, String)> {

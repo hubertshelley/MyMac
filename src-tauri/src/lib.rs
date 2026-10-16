@@ -5,19 +5,15 @@ use tauri::{
     Emitter, Manager,
 };
 
-mod apps;
-mod brew;
-mod clipboard;
-mod config;
-mod launch;
-mod ocr;
+mod commands;
 pub mod screenshot;
-mod status;
-mod system;
-mod totp;
 
-use clipboard::ClipboardState;
-use system::{AppState, SystemMonitor};
+use mymac_core::{
+    clipboard::{self, ClipboardState},
+    config, status, totp,
+    system::{AppState, SystemMonitor},
+};
+use tauri::image::Image;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -59,7 +55,7 @@ pub fn run() {
             let init_icon = {
                 let m = monitor.lock().unwrap();
                 let cfg = config.lock().unwrap();
-                status::render_status_icon(&m.snapshot(), &cfg)
+                to_tray_icon(status::render_status_icon(&m.snapshot(), &cfg))
             };
 
             // 状态栏菜单项（前三项为实时信息，禁用点击）
@@ -239,7 +235,7 @@ pub fn run() {
                 );
                 let _ = net_item.set_text(net_text);
 
-                let icon = status::render_status_icon(&snapshot, &cfg);
+                let icon = to_tray_icon(status::render_status_icon(&snapshot, &cfg));
                 let _ = tray_clone.set_icon(Some(icon));
                 let totp_state = status_app.state::<totp::TotpState>();
                 update_totp_menu(&status_app, &status_totp_submenu, totp_state.inner());
@@ -343,39 +339,39 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            system::get_system_info,
-            apps::list_apps,
-            apps::scan_app_related,
-            apps::uninstall_app_items,
-            brew::get_brew_status,
-            brew::start_brew_install,
-            brew::set_brew_source,
-            brew::list_brew_packages,
-            brew::get_brew_dependencies,
-            brew::search_brew_packages,
-            brew::install_brew_package,
-            brew::uninstall_brew_package,
-            brew::refresh_brew_package,
-            brew::upgrade_brew_package,
-            brew::upgrade_all_brew_packages,
-            launch::list_launch_items,
-            launch::set_launch_item,
-            launch::delete_launch_item,
-            launch::reveal_launch_item,
-            config::get_status_config,
-            config::set_status_config,
-            clipboard::get_clip_history,
-            clipboard::get_clip_image,
-            clipboard::delete_clip_item,
-            clipboard::clear_clip_history,
-            clipboard::copy_clip_item,
-            totp::get_totp_accounts,
-            totp::add_totp_account,
-            totp::delete_totp_account,
-            totp::copy_totp_code,
-            totp::decode_totp_qr_image,
-            totp::capture_totp_qr,
-            totp::decode_totp_qr_clipboard,
+            commands::get_system_info,
+            commands::list_apps,
+            commands::scan_app_related,
+            commands::uninstall_app_items,
+            commands::get_brew_status,
+            commands::start_brew_install,
+            commands::set_brew_source,
+            commands::list_brew_packages,
+            commands::get_brew_dependencies,
+            commands::search_brew_packages,
+            commands::install_brew_package,
+            commands::uninstall_brew_package,
+            commands::refresh_brew_package,
+            commands::upgrade_brew_package,
+            commands::upgrade_all_brew_packages,
+            commands::list_launch_items,
+            commands::set_launch_item,
+            commands::delete_launch_item,
+            commands::reveal_launch_item,
+            commands::get_status_config,
+            commands::set_status_config,
+            commands::get_clip_history,
+            commands::get_clip_image,
+            commands::delete_clip_item,
+            commands::clear_clip_history,
+            commands::copy_clip_item,
+            commands::get_totp_accounts,
+            commands::add_totp_account,
+            commands::delete_totp_account,
+            commands::copy_totp_code,
+            commands::decode_totp_qr_image,
+            commands::capture_totp_qr,
+            commands::decode_totp_qr_clipboard,
             screenshot::get_capture_context,
             screenshot::get_capture_background,
             screenshot::cancel_screenshot,
@@ -388,8 +384,8 @@ pub fn run() {
             screenshot::resize_pin_window,
             screenshot::close_pin_window,
             screenshot::open_screen_capture_settings,
-            ocr::ocr_recognize,
-            ocr::ocr_copy_text,
+            commands::ocr_recognize,
+            commands::ocr_copy_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -430,7 +426,8 @@ fn rebuild_clip_menu(
         for (id, label, thumb) in menu_data {
             if let Some(thumb) = thumb {
                 // 图片记录：带缩略图图标
-                let icon = clipboard::load_thumb_image(&thumb);
+                let icon = clipboard::load_thumb_image(&thumb)
+                    .map(|(rgba, w, h)| Image::new_owned(rgba, w, h));
                 if let Ok(mi) = IconMenuItem::with_id(
                     app,
                     format!("clip-item-{id}"),
@@ -533,6 +530,11 @@ fn rebuild_totp_menu(
     }
     let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = owned.iter().map(|item| item.as_ref()).collect();
     let _ = submenu.append_items(&refs);
+}
+
+/// core 返回 RGBA，这里转成 Tauri 图标
+fn to_tray_icon(icon: status::RgbaIcon) -> Image<'static> {
+    Image::new_owned(icon.rgba, icon.width, icon.height)
 }
 
 fn show_main_window(app: &tauri::AppHandle) {

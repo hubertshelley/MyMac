@@ -14,7 +14,6 @@ pub struct LaunchItem {
     pub location: String,
 }
 
-#[tauri::command]
 pub fn list_launch_items() -> Vec<LaunchItem> {
     let mut items: Vec<LaunchItem> = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
@@ -56,7 +55,6 @@ pub fn list_launch_items() -> Vec<LaunchItem> {
     items
 }
 
-#[tauri::command]
 pub fn set_launch_item(path: String, enabled: bool) -> Result<(), String> {
     let p = Path::new(&path);
     if !p.exists() {
@@ -183,7 +181,6 @@ fn user_id() -> String {
         .unwrap_or_default()
 }
 
-#[tauri::command]
 pub fn delete_launch_item(path: String) -> Result<String, String> {
     let launch_path = PathBuf::from(&path);
     if !launch_path.exists() {
@@ -278,7 +275,6 @@ fn launchctl_error(output: &Output) -> String {
     }
 }
 
-#[tauri::command]
 pub fn reveal_launch_item(path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);
     if !target.exists() {

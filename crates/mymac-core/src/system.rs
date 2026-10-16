@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use sysinfo::{Disks, Networks, System};
-use tauri::State;
 
 #[derive(Serialize, Clone)]
 pub struct SystemInfo {
@@ -52,6 +51,12 @@ pub struct SystemMonitor {
     cache: SystemInfo,
     last_net: HashMap<String, (u64, u64)>,
     last_time: Option<Instant>,
+}
+
+impl Default for SystemMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SystemMonitor {
@@ -194,7 +199,6 @@ pub struct AppState {
     pub config: Arc<Mutex<crate::config::StatusConfig>>,
 }
 
-#[tauri::command]
-pub fn get_system_info(state: State<AppState>) -> SystemInfo {
+pub fn get_system_info(state: &AppState) -> SystemInfo {
     state.monitor.lock().unwrap().snapshot()
 }

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tauri::Emitter;
+use crate::event::{AppEvent, EventSink};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppInfo {
     pub id: String,
     pub name: String,
@@ -22,9 +22,8 @@ pub struct AppRelatedItem {
     pub is_app: bool,
 }
 
-/// 列出可卸载的应用（不含系统应用）。大小在后台异步计算后通过 `app-size` 事件推送。
-#[tauri::command]
-pub fn list_apps(app: tauri::AppHandle) -> Vec<AppInfo> {
+/// 列出可卸载的应用（不含系统应用）。大小在后台异步计算后通过 `AppEvent::AppSize` 推送。
+pub fn list_apps(sink: EventSink) -> Vec<AppInfo> {
     let mut apps: Vec<AppInfo> = Vec::new();
 
     scan_dir(Path::new("/Applications"), &mut apps);
@@ -40,7 +39,7 @@ pub fn list_apps(app: tauri::AppHandle) -> Vec<AppInfo> {
     std::thread::spawn(move || {
         for mut app_info in apps_clone {
             app_info.size = path_size(Path::new(&app_info.path));
-            let _ = app.emit("app-size", &app_info);
+            sink.send(AppEvent::AppSize(app_info));
         }
     });
 
@@ -48,7 +47,6 @@ pub fn list_apps(app: tauri::AppHandle) -> Vec<AppInfo> {
 }
 
 /// 扫描应用本体及用户目录中的常见关联项。
-#[tauri::command]
 pub fn scan_app_related(app: AppInfo) -> Result<Vec<AppRelatedItem>, String> {
     let app_path = PathBuf::from(&app.path);
     if !is_removable_app(&app_path) {
@@ -116,7 +114,6 @@ pub fn scan_app_related(app: AppInfo) -> Result<Vec<AppRelatedItem>, String> {
 }
 
 /// 将用户勾选的应用本体/关联项移入废纸篓。
-#[tauri::command]
 pub fn uninstall_app_items(paths: Vec<String>) -> Result<(), String> {
     if paths.is_empty() {
         return Err("请至少选择一个要删除的项目".to_string());

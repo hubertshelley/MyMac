@@ -147,19 +147,9 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     Ok(cursor.into_inner())
 }
 
-/// Tauri 命令：识别截图选区中的文字。
-/// 在后台线程执行，避免阻塞 WebView 异步运行时。
-#[tauri::command]
-pub async fn ocr_recognize(data: String) -> Result<OcrResult, String> {
-    tauri::async_runtime::spawn_blocking(move || recognize_png(&data))
-        .await
-        .map_err(|e| format!("OCR 后台任务失败：{e}"))?
-}
-
-/// Tauri 命令：复制 OCR 文本，并标记为应用主动复制，避免写入粘贴板历史。
-#[tauri::command]
+/// 复制 OCR 文本，并标记为应用主动复制，避免写入粘贴板历史。
 pub fn ocr_copy_text(
-    clipboard_state: tauri::State<'_, crate::clipboard::ClipboardState>,
+    clipboard_state: &crate::clipboard::ClipboardState,
     text: String,
 ) -> Result<(), String> {
     if text.trim().is_empty() {

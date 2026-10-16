@@ -1,0 +1,5 @@
+[workspace]
+resolver = "2"
+members = ["crates/mymac-core", "src-tauri"]
+# poc 独立构建，不纳入 workspace（依赖 egui 0.36，与主工程解耦）
+exclude = ["poc/egui-poc"]

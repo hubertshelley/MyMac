@@ -346,7 +346,7 @@ pub fn clipboard_change_count() -> Option<i64> {
     #[cfg(target_os = "macos")]
     {
         let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
-        return Some(pasteboard.changeCount() as i64);
+        Some(pasteboard.changeCount() as i64)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -363,7 +363,7 @@ pub fn is_remote_clipboard() -> bool {
         let pasteboard = objc2_app_kit::NSPasteboard::generalPasteboard();
         let remote_type = NSString::from_str("com.apple.is-remote-clipboard");
         let types = NSArray::from_slice(&[remote_type.as_ref()]);
-        return pasteboard.availableTypeFromArray(&types).is_some();
+        pasteboard.availableTypeFromArray(&types).is_some()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -411,16 +411,16 @@ pub fn menu_label(item: &ClipItem) -> String {
     }
 }
 
-/// 读取图片记录的缩略图，作为状态栏菜单项图标
+/// 读取图片记录的缩略图（RGBA），作为状态栏菜单项图标
 /// （muda 在 macOS 上会自动将图标缩放到 18pt 高度显示）
-pub fn load_thumb_image(thumb_file: &str) -> Option<tauri::image::Image<'static>> {
+pub fn load_thumb_image(thumb_file: &str) -> Option<(Vec<u8>, u32, u32)> {
     let path = images_dir().join(thumb_file);
-    let img = tauri::image::Image::from_path(path).ok()?;
-    Some(img.to_owned())
+    let img = image::open(path).ok()?.to_rgba8();
+    let (width, height) = (img.width(), img.height());
+    Some((img.into_raw(), width, height))
 }
 
-#[tauri::command]
-pub fn get_clip_history(state: tauri::State<ClipboardState>) -> Vec<ClipItemView> {
+pub fn get_clip_history(state: &ClipboardState) -> Vec<ClipItemView> {
     let items = state.items.lock().unwrap();
     items
         .iter()
@@ -439,8 +439,7 @@ pub fn get_clip_history(state: tauri::State<ClipboardState>) -> Vec<ClipItemView
 }
 
 /// 获取图片记录的原图 data URL
-#[tauri::command]
-pub fn get_clip_image(state: tauri::State<ClipboardState>, id: String) -> Option<String> {
+pub fn get_clip_image(state: &ClipboardState, id: String) -> Option<String> {
     let items = state.items.lock().unwrap();
     let item = items.iter().find(|i| i.id == id && i.kind == ClipKind::Image)?;
     let file = item.image_file.as_ref()?;
@@ -449,8 +448,7 @@ pub fn get_clip_image(state: tauri::State<ClipboardState>, id: String) -> Option
     Some(format!("data:image/png;base64,{b64}"))
 }
 
-#[tauri::command]
-pub fn delete_clip_item(state: tauri::State<ClipboardState>, id: String) -> Result<(), String> {
+pub fn delete_clip_item(state: &ClipboardState, id: String) -> Result<(), String> {
     let mut items = state.items.lock().unwrap();
     if let Some(pos) = items.iter().position(|i| i.id == id) {
         let removed = items.remove(pos);
@@ -459,12 +457,10 @@ pub fn delete_clip_item(state: tauri::State<ClipboardState>, id: String) -> Resu
     save_history(&items)
 }
 
-#[tauri::command]
-pub fn clear_clip_history(state: tauri::State<ClipboardState>) -> Result<(), String> {
-    clear_history(&state)
+pub fn clear_clip_history(state: &ClipboardState) -> Result<(), String> {
+    clear_history(state)
 }
 
-#[tauri::command]
-pub fn copy_clip_item(state: tauri::State<ClipboardState>, id: String) -> Result<(), String> {
-    copy_to_clipboard_and_top(&state, &id)
+pub fn copy_clip_item(state: &ClipboardState, id: String) -> Result<(), String> {
+    copy_to_clipboard_and_top(state, &id)
 }

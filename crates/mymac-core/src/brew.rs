@@ -1,19 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::PathBuf, process::Command};
-use tauri::Emitter;
+use crate::event::{AppEvent, EventSink};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrewSource {
+    #[default]
     Official,
     Tsinghua,
     Ustc,
-}
-
-impl Default for BrewSource {
-    fn default() -> Self {
-        Self::Official
-    }
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -53,18 +48,18 @@ pub struct BrewOperationResult {
     output: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BrewProgress {
-    operation: String,
-    stage: String,
-    current: usize,
-    total: usize,
-    percent: u8,
-    item: Option<String>,
+    pub operation: String,
+    pub stage: String,
+    pub current: usize,
+    pub total: usize,
+    pub percent: u8,
+    pub item: Option<String>,
 }
 
 fn emit_progress(
-    app: &tauri::AppHandle,
+    sink: &EventSink,
     operation: &str,
     stage: &str,
     current: usize,
@@ -72,17 +67,14 @@ fn emit_progress(
     percent: u8,
     item: Option<String>,
 ) {
-    let _ = app.emit(
-        "brew-progress",
-        BrewProgress {
-            operation: operation.to_string(),
-            stage: stage.to_string(),
-            current,
-            total,
-            percent,
-            item,
-        },
-    );
+    sink.send(AppEvent::BrewProgress(BrewProgress {
+        operation: operation.to_string(),
+        stage: stage.to_string(),
+        current,
+        total,
+        percent,
+        item,
+    }));
 }
 
 fn config_path() -> PathBuf {
@@ -337,7 +329,6 @@ fn get_brew_status_sync() -> BrewStatus {
     }
 }
 
-#[tauri::command]
 pub fn start_brew_install() -> Result<String, String> {
     if brew_path().is_some() {
         return Err("Homebrew 已经安装".to_string());
@@ -596,49 +587,34 @@ fn package_action(action: &str, name: &str, kind: &str) -> Result<BrewOperationR
     })
 }
 
-#[tauri::command]
-pub async fn get_brew_status() -> Result<BrewStatus, String> {
-    tauri::async_runtime::spawn_blocking(get_brew_status_sync)
-        .await
-        .map_err(|error| format!("读取 Homebrew 状态失败：{error}"))
+pub fn get_brew_status() -> BrewStatus {
+    get_brew_status_sync()
 }
 
-#[tauri::command]
-pub async fn set_brew_source(app: tauri::AppHandle, source: BrewSource) -> Result<String, String> {
-    emit_progress(&app, "source", "正在切换软件源", 0, 1, 15, None);
-    let result = tauri::async_runtime::spawn_blocking(move || set_brew_source_sync(source))
-        .await
-        .map_err(|error| format!("切换软件源任务失败：{error}"))?;
-    emit_progress(&app, "source", "软件源切换完成", 1, 1, 100, None);
+pub fn set_brew_source(sink: &EventSink, source: BrewSource) -> Result<String, String> {
+    emit_progress(sink, "source", "正在切换软件源", 0, 1, 15, None);
+    let result = set_brew_source_sync(source);
+    emit_progress(sink, "source", "软件源切换完成", 1, 1, 100, None);
     result
 }
 
-#[tauri::command]
-pub async fn list_brew_packages(app: tauri::AppHandle) -> Result<Vec<BrewPackage>, String> {
-    emit_progress(&app, "load", "正在读取顶层软件", 0, 3, 10, None);
-    let result = tauri::async_runtime::spawn_blocking(list_brew_packages_sync)
-        .await
-        .map_err(|error| format!("读取软件列表任务失败：{error}"))?;
-    emit_progress(&app, "load", "软件列表加载完成", 3, 3, 100, None);
+pub fn list_brew_packages(sink: &EventSink) -> Result<Vec<BrewPackage>, String> {
+    emit_progress(sink, "load", "正在读取顶层软件", 0, 3, 10, None);
+    let result = list_brew_packages_sync();
+    emit_progress(sink, "load", "软件列表加载完成", 3, 3, 100, None);
     result
 }
 
-#[tauri::command]
-pub async fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
-    tauri::async_runtime::spawn_blocking(move || get_brew_dependencies_sync(name, kind))
-        .await
-        .map_err(|error| format!("读取依赖任务失败：{error}"))?
+pub fn get_brew_dependencies(name: String, kind: String) -> Result<Vec<BrewPackage>, String> {
+    get_brew_dependencies_sync(name, kind)
 }
 
-#[tauri::command]
-pub async fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
-    tauri::async_runtime::spawn_blocking(move || search_brew_packages_sync(query))
-        .await
-        .map_err(|error| format!("搜索软件任务失败：{error}"))?
+pub fn search_brew_packages(query: String) -> Result<Vec<BrewPackage>, String> {
+    search_brew_packages_sync(query)
 }
 
-async fn run_package_action(
-    app: tauri::AppHandle,
+fn run_package_action(
+    sink: &EventSink,
     action: &'static str,
     name: String,
     kind: String,
@@ -648,49 +624,41 @@ async fn run_package_action(
         "uninstall" => "正在卸载软件",
         _ => "正在更新软件",
     };
-    emit_progress(&app, action, stage, 0, 1, 10, Some(name.clone()));
-    let result = tauri::async_runtime::spawn_blocking(move || package_action(action, &name, &kind))
-        .await
-        .map_err(|error| format!("Homebrew 后台任务失败：{error}"))?;
-    emit_progress(&app, action, "操作完成", 1, 1, 100, None);
+    emit_progress(sink, action, stage, 0, 1, 10, Some(name.clone()));
+    let result = package_action(action, &name, &kind);
+    emit_progress(sink, action, "操作完成", 1, 1, 100, None);
     result
 }
 
-#[tauri::command]
-pub async fn install_brew_package(
-    app: tauri::AppHandle,
+pub fn install_brew_package(
+    sink: &EventSink,
     name: String,
     kind: String,
 ) -> Result<BrewOperationResult, String> {
-    run_package_action(app, "install", name, kind).await
+    run_package_action(sink, "install", name, kind)
 }
 
-#[tauri::command]
-pub async fn uninstall_brew_package(
-    app: tauri::AppHandle,
+pub fn uninstall_brew_package(
+    sink: &EventSink,
     name: String,
     kind: String,
 ) -> Result<BrewOperationResult, String> {
-    run_package_action(app, "uninstall", name, kind).await
+    run_package_action(sink, "uninstall", name, kind)
 }
 
-#[tauri::command]
-pub async fn refresh_brew_package(name: String, kind: String) -> Result<BrewPackage, String> {
-    tauri::async_runtime::spawn_blocking(move || refresh_brew_package_sync(name, kind))
-        .await
-        .map_err(|error| format!("刷新软件状态任务失败：{error}"))?
+pub fn refresh_brew_package(name: String, kind: String) -> Result<BrewPackage, String> {
+    refresh_brew_package_sync(name, kind)
 }
 
-#[tauri::command]
-pub async fn upgrade_brew_package(
-    app: tauri::AppHandle,
+pub fn upgrade_brew_package(
+    sink: &EventSink,
     name: String,
     kind: String,
 ) -> Result<BrewOperationResult, String> {
-    run_package_action(app, "upgrade", name, kind).await
+    run_package_action(sink, "upgrade", name, kind)
 }
 
-fn upgrade_top_level_packages(app: &tauri::AppHandle) -> Result<BrewOperationResult, String> {
+fn upgrade_top_level_packages(app: &EventSink) -> Result<BrewOperationResult, String> {
     emit_progress(app, "upgrade-all", "正在更新 Homebrew 索引", 0, 1, 5, None);
     let update_output = run_brew(&["update"])?;
     emit_progress(app, "upgrade-all", "正在检查顶层软件更新", 0, 1, 15, None);
@@ -763,12 +731,6 @@ fn upgrade_top_level_packages(app: &tauri::AppHandle) -> Result<BrewOperationRes
     })
 }
 
-#[tauri::command]
-pub async fn upgrade_all_brew_packages(
-    app: tauri::AppHandle,
-) -> Result<BrewOperationResult, String> {
-    let progress_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || upgrade_top_level_packages(&progress_app))
-        .await
-        .map_err(|error| format!("批量更新后台任务失败：{error}"))?
+pub fn upgrade_all_brew_packages(sink: &EventSink) -> Result<BrewOperationResult, String> {
+    upgrade_top_level_packages(sink)
 }

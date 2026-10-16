@@ -4,8 +4,7 @@
 //! 冻结背景 → 为每块屏幕创建无边框透明覆盖窗口 → 前端完成框选与标注 →
 //! 输出（保存文件 / 复制粘贴板 / 贴图置顶）。
 
-pub mod capture;
-pub mod winlist;
+pub use mymac_core::screenshot::{capture, winlist};
 
 use std::collections::HashMap;
 use std::path::PathBuf;

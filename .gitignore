@@ -26,3 +26,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Cargo workspace 根目录构建产物
+/target/
+
+# egui PoC 的 .app 包是构建产物（含 13MB 二进制），不入库
+poc/egui-poc/*.app/
+poc/egui-poc/target/

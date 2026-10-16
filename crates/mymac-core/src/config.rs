@@ -52,14 +52,12 @@ pub fn save_config(config: &StatusConfig) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn get_status_config(state: tauri::State<crate::system::AppState>) -> StatusConfig {
+pub fn get_status_config(state: &crate::system::AppState) -> StatusConfig {
     state.config.lock().unwrap().clone()
 }
 
-#[tauri::command]
 pub fn set_status_config(
-    state: tauri::State<crate::system::AppState>,
+    state: &crate::system::AppState,
     config: StatusConfig,
 ) -> Result<(), String> {
     save_config(&config)?;
