@@ -257,6 +257,13 @@ impl ScreenshotManager {
             capture::request_screen_capture_access();
             return;
         }
+        // 重复触发时先把旧覆盖层移出屏幕，否则会把覆盖层自己抓进冻结背景
+        // （多次触发后画面叠加发黑）。orderOut 同步生效，稍候再抓。
+        let was_visible = crate::macos::order_out_titled_prefix("screenshot-overlay");
+        if was_visible {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+
         let displays = capture::active_displays();
         if displays.is_empty() {
             diag("未枚举到任何显示器，无法截图");
@@ -270,6 +277,10 @@ impl ScreenshotManager {
         for (index, display) in displays.iter().enumerate() {
             match capture::grab_display_rgba(display.id) {
                 Ok(grab) => {
+                    if let Ok(png) = capture::encode_png(grab.rgba.clone(), grab.width, grab.height)
+                    {
+                        let _ = std::fs::write("/tmp/mymac-capture-debug.png", png);
+                    }
                     let image = egui::ColorImage::from_rgba_unmultiplied(
                         [grab.width, grab.height],
                         &grab.rgba,
@@ -868,118 +879,121 @@ fn draw_toolbar(
             .corner_radius(8)
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                let mut tool_button = |ui: &mut egui::Ui, tool: Tool, icon, tip: &str| {
-                    let active = overlay.tool == tool;
-                    let button = Button::new("")
-                        .variant(if active {
-                            ButtonVariant::Secondary
-                        } else {
-                            ButtonVariant::Ghost
-                        })
-                        .size(ButtonSize::IconSm)
-                        .icon(icon)
-                        .enabled(true);
-                    if ui.add(button).on_hover_text(tip).clicked() {
-                        overlay.tool = tool;
-                        overlay.text_pos = None;
-                        overlay.text_buf.clear();
-                    }
-                };
-                tool_button(ui, Tool::Select, &lucide::MOVE, "选择 / 调整选区");
-                tool_button(ui, Tool::Rect, &lucide::SQUARE, "矩形标注");
-                tool_button(ui, Tool::Arrow, &lucide::ARROW_UP_RIGHT, "箭头标注");
-                tool_button(ui, Tool::Text, &lucide::TYPE, "文本标注");
-                ui.separator();
-                // 颜色板
-                for (index, color) in COLORS.iter().enumerate() {
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-                    let swatch =
-                        egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 255);
-                    if overlay.color == index {
-                        ui.painter().rect_filled(rect, 4.0, swatch);
-                        ui.painter().rect_stroke(
-                            rect,
-                            4.0,
-                            egui::Stroke::new(2.0_f32, palette.primary),
-                            egui::StrokeKind::Inside,
+                ui.horizontal(|ui| {
+                    let mut tool_button = |ui: &mut egui::Ui, tool: Tool, icon, tip: &str| {
+                        let active = overlay.tool == tool;
+                        let button = Button::new("")
+                            .variant(if active {
+                                ButtonVariant::Secondary
+                            } else {
+                                ButtonVariant::Ghost
+                            })
+                            .size(ButtonSize::IconSm)
+                            .icon(icon)
+                            .enabled(true);
+                        if ui.add(button).on_hover_text(tip).clicked() {
+                            overlay.tool = tool;
+                            overlay.text_pos = None;
+                            overlay.text_buf.clear();
+                        }
+                    };
+                    tool_button(ui, Tool::Select, &lucide::MOVE, "选择 / 调整选区");
+                    tool_button(ui, Tool::Rect, &lucide::SQUARE, "矩形标注");
+                    tool_button(ui, Tool::Arrow, &lucide::ARROW_UP_RIGHT, "箭头标注");
+                    tool_button(ui, Tool::Text, &lucide::TYPE, "文本标注");
+                    ui.separator();
+                    // 颜色板
+                    for (index, color) in COLORS.iter().enumerate() {
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                        let swatch = egui::Color32::from_rgba_unmultiplied(
+                            color[0], color[1], color[2], 255,
                         );
-                    } else {
-                        ui.painter().rect_filled(rect, 4.0, swatch);
-                    }
-                    if response.clicked() {
-                        overlay.color = index;
-                    }
-                }
-                ui.separator();
-                for (index, label) in ["细", "中", "粗"].iter().enumerate() {
-                    let active = overlay.thickness == index;
-                    let button = Button::new(*label)
-                        .variant(if active {
-                            ButtonVariant::Secondary
+                        if overlay.color == index {
+                            ui.painter().rect_filled(rect, 4.0, swatch);
+                            ui.painter().rect_stroke(
+                                rect,
+                                4.0,
+                                egui::Stroke::new(2.0_f32, palette.primary),
+                                egui::StrokeKind::Inside,
+                            );
                         } else {
-                            ButtonVariant::Ghost
-                        })
-                        .size(ButtonSize::Sm);
-                    if ui.add(button).clicked() {
-                        overlay.thickness = index;
+                            ui.painter().rect_filled(rect, 4.0, swatch);
+                        }
+                        if response.clicked() {
+                            overlay.color = index;
+                        }
                     }
-                }
-                ui.separator();
-                if ui
-                    .add(
-                        Button::new("")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconSm)
-                            .icon(&lucide::UNDO),
-                    )
-                    .on_hover_text("撤销标注")
-                    .clicked()
-                {
-                    overlay.shapes.pop();
-                }
-                if ui
-                    .add(
-                        Button::new("识别")
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Sm)
-                            .icon(&lucide::SCAN_TEXT),
-                    )
-                    .clicked()
-                {
-                    action = ToolAction::Ocr;
-                }
-                if ui
-                    .add(
-                        Button::new("保存")
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Sm)
-                            .icon(&lucide::SAVE),
-                    )
-                    .clicked()
-                {
-                    action = ToolAction::Save;
-                }
-                if ui
-                    .add(Button::new("复制").size(ButtonSize::Sm).icon(&lucide::COPY))
-                    .clicked()
-                {
-                    action = ToolAction::Copy;
-                }
-                if ui
-                    .add(
-                        Button::new("")
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::IconSm)
-                            .icon(&lucide::X),
-                    )
-                    .on_hover_text("关闭（Esc）")
-                    .clicked()
-                {
-                    action = ToolAction::Cancel;
-                }
-                // 标记选区锚点，便于引用参数
-                let _ = sel;
+                    ui.separator();
+                    for (index, label) in ["细", "中", "粗"].iter().enumerate() {
+                        let active = overlay.thickness == index;
+                        let button = Button::new(*label)
+                            .variant(if active {
+                                ButtonVariant::Secondary
+                            } else {
+                                ButtonVariant::Ghost
+                            })
+                            .size(ButtonSize::Sm);
+                        if ui.add(button).clicked() {
+                            overlay.thickness = index;
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .add(
+                            Button::new("")
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::IconSm)
+                                .icon(&lucide::UNDO),
+                        )
+                        .on_hover_text("撤销标注")
+                        .clicked()
+                    {
+                        overlay.shapes.pop();
+                    }
+                    if ui
+                        .add(
+                            Button::new("识别")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .icon(&lucide::SCAN_TEXT),
+                        )
+                        .clicked()
+                    {
+                        action = ToolAction::Ocr;
+                    }
+                    if ui
+                        .add(
+                            Button::new("保存")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .icon(&lucide::SAVE),
+                        )
+                        .clicked()
+                    {
+                        action = ToolAction::Save;
+                    }
+                    if ui
+                        .add(Button::new("复制").size(ButtonSize::Sm).icon(&lucide::COPY))
+                        .clicked()
+                    {
+                        action = ToolAction::Copy;
+                    }
+                    if ui
+                        .add(
+                            Button::new("")
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::IconSm)
+                                .icon(&lucide::X),
+                        )
+                        .on_hover_text("关闭（Esc）")
+                        .clicked()
+                    {
+                        action = ToolAction::Cancel;
+                    }
+                    // 标记选区锚点，便于引用参数
+                    let _ = sel;
+                });
             });
     });
     action
