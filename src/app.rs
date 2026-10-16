@@ -5,6 +5,7 @@ use std::sync::mpsc::Receiver;
 use eframe::egui;
 use shadcn_egui::Theme;
 use shadcn_egui::components::button::{Button, ButtonSize, ButtonVariant};
+use shadcn_egui::components::icon::paint_icon;
 use shadcn_egui::icons::lucide;
 
 use crate::event::{UiEvent, UiSink};
@@ -18,7 +19,6 @@ use crate::widgets::NavItem;
 
 pub struct MyMacApp {
     receiver: Receiver<UiEvent>,
-    #[allow(dead_code)] // M5 截图覆盖层会用来回传事件
     sink: UiSink,
     shared: Shared,
     /// 托盘菜单句柄只能在主线程使用，由 `logic`（主线程）持有并更新
@@ -26,6 +26,7 @@ pub struct MyMacApp {
     page: Page,
     appearance: Appearance,
     launch: views::launch::LaunchView,
+    apps: views::apps::AppsView,
     /// 正在退出：此时窗口的关闭请求要放行，不能再当成「关闭 = 隐藏」拦截
     quitting: bool,
 }
@@ -40,6 +41,7 @@ impl MyMacApp {
             page: Page::default(),
             appearance: Appearance::default(),
             launch: views::launch::LaunchView::new(),
+            apps: views::apps::AppsView::new(),
             quitting: false,
         }
     }
@@ -71,6 +73,7 @@ impl eframe::App for MyMacApp {
                         self.tray.refresh(&info, &self.shared);
                     }
                 }
+                UiEvent::AppSize(info) => self.apps.on_app_size(info),
                 UiEvent::ClipboardChanged => self.tray.rebuild_clip_menu(&self.shared),
                 UiEvent::TotpCopied(result) => {
                     if let Err(error) = result {
@@ -122,6 +125,7 @@ impl eframe::App for MyMacApp {
                     let info = self.shared.latest.lock().unwrap().clone();
                     views::dashboard::show(ui, info.as_ref());
                 }
+                Page::Apps => self.apps.show(ui, &self.sink),
                 Page::Launch => self.launch.show(ui),
                 page => views::placeholder::show(ui, page),
             });
@@ -129,9 +133,28 @@ impl eframe::App for MyMacApp {
 }
 
 impl MyMacApp {
+    /// 顶部品牌区：主色圆角 Logo 块 + 「MyMac 管家」（与旧版一致）。
+    fn brand(&self, ui: &mut egui::Ui) {
+        let palette = Theme::current(ui.ctx()).palette;
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(6), palette.primary);
+            let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+            paint_icon(
+                ui.painter(),
+                icon_rect,
+                &lucide::GAUGE,
+                palette.primary_foreground,
+                Theme::current(ui.ctx()).metrics.icon_stroke,
+            );
+            ui.label(egui::RichText::new("MyMac 管家").strong());
+        });
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.heading("MyMac");
+        self.brand(ui);
         ui.add_space(12.0);
 
         for page in Page::ALL {

@@ -37,8 +37,8 @@ pub fn show(ui: &mut Ui, info: Option<&SystemInfo>) {
                     ui.label(
                         RichText::new(format!(
                             "{} / {}",
-                            format_bytes(info.memory_used),
-                            format_bytes(info.memory_total)
+                            crate::fmt::bytes(info.memory_used),
+                            crate::fmt::bytes(info.memory_total)
                         ))
                         .color(muted),
                     );
@@ -60,8 +60,8 @@ pub fn show(ui: &mut Ui, info: Option<&SystemInfo>) {
                             ui.label(
                                 RichText::new(format!(
                                     "{} / {}",
-                                    format_bytes(disk.used),
-                                    format_bytes(disk.total)
+                                    crate::fmt::bytes(disk.used),
+                                    crate::fmt::bytes(disk.total)
                                 ))
                                 .color(muted),
                             );
@@ -88,14 +88,4 @@ fn card_title(ui: &mut Ui, icon: &shadcn_egui::Icon, title: &str, muted: egui::C
         ui.add(IconView::new(icon).size(16.0).color(muted));
         ui.label(RichText::new(title).strong());
     });
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    let i = ((bytes as f64).log2() / 10.0).floor() as usize;
-    let i = i.min(UNITS.len() - 1);
-    format!("{:.1} {}", bytes as f64 / 1024f64.powi(i as i32), UNITS[i])
 }

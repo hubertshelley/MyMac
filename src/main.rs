@@ -8,6 +8,7 @@
 
 mod app;
 mod event;
+mod fmt;
 mod hotkey;
 mod macos;
 mod nav;

@@ -1,7 +1,7 @@
 //! 侧边栏导航项：整行宽度、图标 + 文字左对齐。
 //!
 //! shadcn-egui 的 Button 内容居中且宽度随内容，做不出 shadcn Sidebar 的整行菜单项，
-//! 这里按同一套色板自绘：选中态 `accent`，悬停态 `accent` 半透明。
+//! 这里按同一套色板自绘：选中态实心 `primary`（与旧版一致），悬停态 `accent`。
 
 use eframe::egui::{self, Response, Sense, Ui, Vec2, Widget};
 use shadcn_egui::components::icon::paint_icon;
@@ -36,9 +36,9 @@ impl Widget for NavItem<'_> {
             let painter = ui.painter();
             let radius = egui::CornerRadius::same(8);
             let (fill, fg) = if self.selected {
-                (Some(palette.accent), palette.accent_foreground)
+                (Some(palette.primary), palette.primary_foreground)
             } else if response.hovered() {
-                (Some(palette.accent.gamma_multiply(0.6)), palette.foreground)
+                (Some(palette.accent), palette.accent_foreground)
             } else {
                 (None, palette.muted_foreground)
             };

@@ -8,9 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+use mymac_core::apps::AppInfo;
+
 use crate::nav::Page;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum UiEvent {
     ShowMainWindow,
     /// 显示主窗口并切到指定页面（如托盘「管理 2FA」）
@@ -19,6 +21,8 @@ pub enum UiEvent {
     StartScreenshot,
     /// 后台线程完成一次系统采样（每 2 秒），主线程据此刷新托盘
     SystemSampled,
+    /// 应用大小计算完成（`list_apps` 后台线程逐个推送）
+    AppSize(AppInfo),
     /// 粘贴板历史变化（来自监听线程或托盘操作）
     ClipboardChanged,
     /// 状态栏 2FA 复制结果（成功时携带账户 id）

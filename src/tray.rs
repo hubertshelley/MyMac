@@ -87,8 +87,8 @@ impl Tray {
         self.mem.set_text(format!(
             "内存：{:.1}%（{} / {}）",
             info.memory_usage,
-            format_bytes(info.memory_used),
-            format_bytes(info.memory_total)
+            crate::fmt::bytes(info.memory_used),
+            crate::fmt::bytes(info.memory_total)
         ));
         self.net.set_text(format!(
             "网络：↓ {} · ↑ {}",
@@ -276,14 +276,4 @@ pub fn spawn_forwarder(sink: UiSink, shared: Shared) {
             }
         }
     });
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    let i = ((bytes as f64).log2() / 10.0).floor() as usize;
-    let i = i.min(UNITS.len() - 1);
-    format!("{:.1} {}", bytes as f64 / 1024f64.powi(i as i32), UNITS[i])
 }
