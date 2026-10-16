@@ -12,6 +12,7 @@ mod hotkey;
 mod macos;
 mod nav;
 mod state;
+mod task;
 mod theme;
 mod tray;
 mod views;

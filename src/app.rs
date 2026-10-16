@@ -25,6 +25,7 @@ pub struct MyMacApp {
     tray: Tray,
     page: Page,
     appearance: Appearance,
+    launch: views::launch::LaunchView,
 }
 
 impl MyMacApp {
@@ -36,6 +37,7 @@ impl MyMacApp {
             tray,
             page: Page::default(),
             appearance: Appearance::default(),
+            launch: views::launch::LaunchView::new(),
         }
     }
 
@@ -111,6 +113,7 @@ impl eframe::App for MyMacApp {
                     let info = self.shared.latest.lock().unwrap().clone();
                     views::dashboard::show(ui, info.as_ref());
                 }
+                Page::Launch => self.launch.show(ui),
                 page => views::placeholder::show(ui, page),
             });
     }
