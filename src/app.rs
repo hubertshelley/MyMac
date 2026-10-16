@@ -68,6 +68,8 @@ impl MyMacApp {
 impl eframe::App for MyMacApp {
     /// 窗口隐藏时唯一仍会执行的入口：消费托盘 / 快捷键 / 采样事件并更新托盘。
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 主窗口隐藏时 ui() 不跑；覆盖层视口的每 pass 声明在这里兜底
+        self.screenshot.declare(ctx);
         while let Ok(event) = self.receiver.try_recv() {
             match event {
                 UiEvent::ShowMainWindow => Self::show_main_window(ctx),
@@ -126,8 +128,8 @@ impl eframe::App for MyMacApp {
             )
             .show_inside(ui, |ui| self.sidebar(ui));
 
-        // 截图覆盖层视口（隐藏态注册；显隐由 ViewportCommand 驱动）
-        self.screenshot.register(ui);
+        // 截图覆盖层视口：deferred 视口每个 pass 都要重新声明，否则会被移除
+        self.screenshot.declare(&ctx);
 
         egui::CentralPanel::default()
             .frame(

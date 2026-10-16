@@ -218,11 +218,8 @@ impl Overlay {
 /// 截图管理器：主线程持有，负责抓屏与视口注册。
 pub struct ScreenshotManager {
     overlay: Arc<Mutex<Overlay>>,
-    /// 已枚举的显示器（ui 每帧按这个列表检查注册）
+    /// 已枚举的显示器（声明覆盖层视口用）
     displays: Vec<DisplayInfo>,
-    /// 已注册过视口的显示器 id（每个显示器只注册一次，
-    /// 避免每帧重建视口把 ViewportCommand 设置的可见性覆盖掉）
-    registered: std::collections::HashSet<u32>,
     /// OCR 识别状态：None=未在识别，Some(Err/Ok)=已完成
     ocr: Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
 }
@@ -247,7 +244,6 @@ impl ScreenshotManager {
                 move_ref: None,
             })),
             displays: capture::active_displays(),
-            registered: std::collections::HashSet::new(),
             ocr: Arc::new(Mutex::new(None)),
         }
     }
@@ -322,6 +318,7 @@ impl ScreenshotManager {
             overlay.visible = true;
         }
         *self.ocr.lock().unwrap() = None;
+        self.declare(ctx);
         for id in id_list {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
@@ -329,30 +326,30 @@ impl ScreenshotManager {
         log::info!("截图覆盖层已显示（{} 块屏幕）", self.displays.len());
     }
 
-    /// 主窗口可见期间检查覆盖层视口注册（隐藏态），显隐全部由 ViewportCommand 驱动。
-    pub fn register(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        for display in &self.displays {
-            if !self.registered.insert(display.id) {
-                continue;
+    /// 声明覆盖层视口。egui 要求 deferred 视口**每个 pass 都重新声明**，
+    /// 否则视口会被移除——logic() 与 ui() 每次都要调用本方法。
+    /// 主窗口隐藏时 ui() 不跑，logic() 仍会执行，保证覆盖层可以唤起。
+    pub fn declare(&mut self, ctx: &egui::Context) {
+        {
+            for display in &self.displays {
+                let id = viewport_id(display.id);
+                let builder = egui::ViewportBuilder::default()
+                    .with_title(format!("screenshot-overlay-{}", display.id))
+                    .with_visible(false)
+                    .with_transparent(true)
+                    .with_decorations(false)
+                    .with_always_on_top()
+                    .with_resizable(false)
+                    .with_position(egui::pos2(display.x as f32, display.y as f32))
+                    .with_inner_size([display.width as f32, display.height as f32]);
+                let state = self.overlay.clone();
+                let ocr = self.ocr.clone();
+                let display_id = display.id;
+                ctx.show_viewport_deferred(id, builder, move |ui: &mut egui::Ui, _class| {
+                    overlay_viewport(display_id, &state, &ocr, ui);
+                });
+                diag(format!("声明覆盖层视口 display={}", display.id));
             }
-            diag(format!("注册覆盖层视口 display={}", display.id));
-            let id = viewport_id(display.id);
-            let builder = egui::ViewportBuilder::default()
-                .with_title(format!("screenshot-overlay-{}", display.id))
-                .with_visible(false)
-                .with_transparent(true)
-                .with_decorations(false)
-                .with_always_on_top()
-                .with_resizable(false)
-                .with_position(egui::pos2(display.x as f32, display.y as f32))
-                .with_inner_size([display.width as f32, display.height as f32]);
-            let state = self.overlay.clone();
-            let ocr = self.ocr.clone();
-            let display_id = display.id;
-            ctx.show_viewport_deferred(id, builder, move |ui: &mut egui::Ui, _class| {
-                overlay_viewport(display_id, &state, &ocr, ui);
-            });
         }
     }
 }
@@ -448,6 +445,19 @@ fn overlay_viewport(
                 ui.max_rect(),
                 egui::Rect::from_min_size(egui::Pos2::ZERO, tile_rect.size()),
                 egui::Color32::WHITE,
+            );
+            // 调试层：能看见红色蒙层 = 视口在渲染；看不见红色但看得见背景 = 正常
+            painter.rect_filled(
+                ui.max_rect(),
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(255, 0, 0, 30),
+            );
+            painter.text(
+                ui.max_rect().center_top() + egui::vec2(0.0, 40.0),
+                egui::Align2::CENTER_TOP,
+                "MyMac 截图覆盖层（调试模式）",
+                egui::FontId::proportional(20.0),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
             );
 
             let pointer = ui.input(|i| i.pointer.interact_pos());
