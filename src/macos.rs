@@ -7,8 +7,6 @@ use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
 use objc2_foundation::NSData;
 
-/// 把指定标题前缀的窗口提到最高层级（screenSaver 级，覆盖 Dock）。
-/// 截图覆盖层用：普通 always-on-top 会被 Dock 盖住。
 /// 把指定标题前缀的窗口临时移出屏幕（orderOut），返回是否存在窗口。
 /// 截图重触发时先移走旧覆盖层，避免把覆盖层自己抓进冻结背景。
 pub fn order_out_titled_prefix(title_prefix: &str) -> bool {
@@ -26,6 +24,8 @@ pub fn order_out_titled_prefix(title_prefix: &str) -> bool {
     found
 }
 
+/// 把指定标题前缀的窗口提到最高层级（screenSaver 级，覆盖 Dock）。
+/// 截图覆盖层用：普通 always-on-top 会被 Dock 盖住。
 pub fn raise_windows_titled_prefix(title_prefix: &str) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;

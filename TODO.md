@@ -87,7 +87,8 @@
   - [x] 输出：Enter/复制（合成标注写剪贴板）、保存文件（rfd）、识别文字（Vision OCR 面板，逐行展示/复制全部）
   - [x] 整屏截图：悬停无窗口区域高亮整屏，单击选中整屏
   - [x] 重复触发：覆盖层任意状态下再触发，重新抓屏替换旧会话
-- [ ] M6 贴图 / M7 打包切换（Bundle ID `com.hubertshelley.mymac` + Developer ID 签名与公证）
+- [x] M6 贴图：工具栏「贴图」按钮合成选区生成置顶小窗（拖动移动 / 滚轮缩放 / 右键关闭，可多张共存，独立于覆盖层常驻）
+- [ ] M7 打包切换（Bundle ID `com.hubertshelley.mymac` + Developer ID 签名与公证）
 
 ## 后续阶段（v0.2）
 

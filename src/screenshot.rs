@@ -7,7 +7,7 @@
 //! - 输出：Enter / 复制按钮合成选区写剪贴板；保存文件（rfd）；识别文字（Vision OCR）
 //! - 覆盖层存在时再触发（F1 / 托盘）→ 重新抓屏替换会话（M5 新需求 2）
 //!
-//! 待 M6：贴图置顶视口。
+//! 贴图（M6）：置顶小窗，拖动移动、滚轮缩放、右键关闭；独立于覆盖层常驻。
 
 use std::sync::{Arc, Mutex};
 
@@ -71,6 +71,10 @@ fn viewport_id(display_id: u32) -> egui::ViewportId {
     egui::ViewportId(egui::Id::new(("screenshot-overlay", display_id)))
 }
 
+fn pin_viewport_id(pin_id: u32) -> egui::ViewportId {
+    egui::ViewportId(egui::Id::new(("screenshot-pin", pin_id)))
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
     Select,
@@ -99,6 +103,18 @@ struct Shape {
     text: String,
     color: [u8; 4],
     width: f32,
+}
+
+/// 贴图：置顶小窗，独立于截图覆盖层常驻（关闭覆盖层后仍显示）。
+struct PinImage {
+    id: u32,
+    texture: egui::TextureHandle,
+    /// 窗口位置（全局逻辑坐标）
+    pos: egui::Pos2,
+    /// 显示尺寸（逻辑像素，滚轮缩放改变）
+    size: egui::Vec2,
+    /// 拖动起点（全局逻辑坐标）
+    drag_ref: Option<egui::Pos2>,
 }
 
 /// 标注文字的离线栅格化（共享一次字体加载）。
@@ -175,6 +191,9 @@ struct Overlay {
     /// 8 控制点 / 整体拖动
     handle: Option<Handle>,
     move_ref: Option<(egui::Pos2, egui::Rect)>,
+    /// 贴图列表（常驻，独立于覆盖层显隐）
+    pins: Vec<PinImage>,
+    pin_seq: u32,
 }
 
 impl Overlay {
@@ -242,6 +261,8 @@ impl ScreenshotManager {
                 text_buf: String::new(),
                 handle: None,
                 move_ref: None,
+                pins: Vec::new(),
+                pin_seq: 0,
             })),
             displays: capture::active_displays(),
             ocr: Arc::new(Mutex::new(None)),
@@ -365,6 +386,30 @@ impl ScreenshotManager {
                 diag(format!("声明覆盖层视口 display={}", display.id));
             }
         }
+        // 贴图视口：独立于覆盖层常驻，同样每个 pass 重新声明（deferred 视口必须每帧重声明）
+        let pins: Vec<(u32, egui::Pos2, egui::Vec2)> = {
+            let overlay = self.overlay.lock().unwrap();
+            overlay.pins.iter().map(|p| (p.id, p.pos, p.size)).collect()
+        };
+        for (id, pos, size) in pins {
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("screenshot-pin-{id}"))
+                .with_visible(true)
+                .with_transparent(true)
+                .with_decorations(false)
+                .with_always_on_top()
+                .with_resizable(false)
+                .with_position(pos)
+                .with_inner_size([size.x, size.y]);
+            let state = self.overlay.clone();
+            ctx.show_viewport_deferred(
+                pin_viewport_id(id),
+                builder,
+                move |ui: &mut egui::Ui, _class| {
+                    pin_viewport(id, &state, ui);
+                },
+            );
+        }
     }
 }
 
@@ -433,6 +478,7 @@ fn overlay_viewport(
     let mut copy_sel: Option<egui::Rect> = None;
     let mut save_sel: Option<egui::Rect> = None;
     let mut ocr_sel: Option<egui::Rect> = None;
+    let mut pin_sel: Option<egui::Rect> = None;
 
     #[allow(deprecated)]
     egui::CentralPanel::default()
@@ -507,6 +553,8 @@ fn overlay_viewport(
                 } else if response == ToolAction::Ocr {
                     ocr_sel = Some(sel);
                     *ocr.lock().unwrap() = None;
+                } else if response == ToolAction::Pin {
+                    pin_sel = Some(sel);
                 } else if response == ToolAction::Cancel {
                     finish = true;
                 }
@@ -566,8 +614,41 @@ fn overlay_viewport(
             }
         });
 
-    // ---- 锁外输出：复制 / 保存 / OCR ----
+    // ---- 锁外输出：复制 / 保存 / OCR / 贴图 ----
     if finish {
+        return;
+    }
+    if let Some(sel) = pin_sel {
+        if let Some((w, h, rgba)) = compose(state, display_id, sel) {
+            let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let scale = state
+                .lock()
+                .unwrap()
+                .tiles
+                .iter()
+                .find(|t| t.display_id == display_id)
+                .map_or(1.0, |t| t.scale) as f32;
+            let mut overlay = state.lock().unwrap();
+            overlay.pin_seq += 1;
+            let id = overlay.pin_seq;
+            let texture = ctx.load_texture(
+                format!("screenshot-pin-{id}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            // 以 1:1 物理像素显示（逻辑尺寸 = 像素 / 缩放）
+            let size = egui::vec2((w as f32 / scale).max(48.0), (h as f32 / scale).max(48.0));
+            overlay.pins.push(PinImage {
+                id,
+                texture,
+                pos: sel.min,
+                size,
+                drag_ref: None,
+            });
+            diag(format!("贴图已创建 id={id} size={size:?}"));
+            // 关闭截图覆盖层，露出贴图
+            overlay.hide_all(&ctx);
+        }
         return;
     }
     if let Some(sel) = copy_sel {
@@ -831,6 +912,7 @@ enum ToolAction {
     Copy,
     Save,
     Ocr,
+    Pin,
     Cancel,
 }
 
@@ -978,6 +1060,18 @@ fn draw_toolbar(
                         .clicked()
                     {
                         action = ToolAction::Copy;
+                    }
+                    if ui
+                        .add(
+                            Button::new("贴图")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .icon(&lucide::PIN),
+                        )
+                        .on_hover_text("贴图：置顶显示，可拖动 / 滚轮缩放 / 右键关闭")
+                        .clicked()
+                    {
+                        action = ToolAction::Pin;
                     }
                     if ui
                         .add(
@@ -1270,4 +1364,98 @@ fn run_output(
     if let Some((w, h, rgba)) = compose(state, display_id, sel) {
         sink(w, h, rgba);
     }
+}
+
+/// 贴图视口每帧渲染与交互：拖动移动、滚轮缩放、右键关闭。
+fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    // 快照本贴图的纹理与位置（贴图可能已被右键删除）
+    let snapshot = {
+        let overlay = state.lock().unwrap();
+        overlay
+            .pins
+            .iter()
+            .find(|p| p.id == pin_id)
+            .map(|p| (p.texture.id(), p.pos))
+    };
+    let Some((texture_id, pin_pos)) = snapshot else {
+        // 贴图已移除：关闭对应视口
+        ctx.send_viewport_cmd_to(pin_viewport_id(pin_id), egui::ViewportCommand::Close);
+        return;
+    };
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show_inside(ui, |ui| {
+            let painter = ui.painter();
+            let rect = ui.max_rect();
+            painter.image(
+                texture_id,
+                rect,
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+            // 细白边，便于在浅色背景上分辨贴图边界
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                egui::StrokeKind::Outside,
+            );
+
+            // 指针坐标转全局屏幕坐标：窗口跟随光标移动时局部坐标会漂移，
+            // 用「窗口位置 + 局部坐标」得到稳定全局坐标，拖动才不抖动 / 跑飞。
+            let pointer_local = ui
+                .input(|i| i.pointer.interact_pos())
+                .filter(|p| p.is_finite());
+            let pointer_global = pointer_local.map(|p| p + pin_pos.to_vec2());
+            let pressed = ui.input(|i| i.pointer.primary_pressed());
+            let down = ui.input(|i| i.pointer.primary_down());
+            let released = ui.input(|i| i.pointer.primary_released());
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            let right = ui.input(|i| i.pointer.secondary_clicked());
+
+            // 拖动移动（按全局坐标增量，避免窗口跟随光标时的反馈漂移）
+            if pressed {
+                let mut overlay = state.lock().unwrap();
+                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
+                    pin.drag_ref = pointer_global;
+                }
+            } else if down {
+                let mut overlay = state.lock().unwrap();
+                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id)
+                    && let (Some(start), Some(cur)) = (pin.drag_ref, pointer_global)
+                {
+                    pin.pos += cur - start;
+                    pin.drag_ref = Some(cur);
+                }
+            } else if released {
+                let mut overlay = state.lock().unwrap();
+                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
+                    pin.drag_ref = None;
+                }
+            }
+
+            // 滚轮缩放（保持中心不动）
+            if scroll.abs() > 0.5 {
+                let factor = 1.0 + (scroll * 0.002).clamp(-0.15, 0.15);
+                let mut overlay = state.lock().unwrap();
+                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
+                    let center = pin.pos + pin.size * 0.5;
+                    let size = egui::vec2(
+                        (pin.size.x * factor).clamp(48.0, 6000.0),
+                        (pin.size.y * factor).clamp(48.0, 6000.0),
+                    );
+                    pin.size = size;
+                    pin.pos = center - size * 0.5;
+                }
+            }
+
+            // 右键关闭
+            if right {
+                let mut overlay = state.lock().unwrap();
+                overlay.pins.retain(|p| p.id != pin_id);
+                ctx.send_viewport_cmd_to(pin_viewport_id(pin_id), egui::ViewportCommand::Close);
+            }
+        });
 }
