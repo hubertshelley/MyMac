@@ -34,6 +34,18 @@ fn main() -> eframe::Result {
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .init();
+    // panic 信息写入诊断日志（.app 方式启动时 stderr 不可见，崩溃只表现为闪退）
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        crate::screenshot::diag(format!(
+            "PANIC at {location}: {info}\nbacktrace:\n{backtrace}"
+        ));
+        eprintln!("PANIC at {location}: {info}");
+    }));
     macos::install_app_icon();
 
     let (tx, rx) = mpsc::channel();

@@ -21,7 +21,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key><string>com.hubertshelley.mymac.dev</string>
-    <key>CFBundleName</key><string>MyMac</string>
+    <key>CFBundleName</key><string>MyMac Dev</string>
+    <key>CFBundleDisplayName</key><string>MyMac Dev</string>
     <key>CFBundleExecutable</key><string>MyMac</string>
     <key>CFBundleIconFile</key><string>icon</string>
     <key>CFBundlePackageType</key><string>APPL</string>

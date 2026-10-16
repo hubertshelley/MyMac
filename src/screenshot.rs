@@ -446,21 +446,11 @@ fn overlay_viewport(
                 egui::Rect::from_min_size(egui::Pos2::ZERO, tile_rect.size()),
                 egui::Color32::WHITE,
             );
-            // 调试层：能看见红色蒙层 = 视口在渲染；看不见红色但看得见背景 = 正常
-            painter.rect_filled(
-                ui.max_rect(),
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(255, 0, 0, 30),
-            );
-            painter.text(
-                ui.max_rect().center_top() + egui::vec2(0.0, 40.0),
-                egui::Align2::CENTER_TOP,
-                "MyMac 截图覆盖层（调试模式）",
-                egui::FontId::proportional(20.0),
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
-            );
 
-            let pointer = ui.input(|i| i.pointer.interact_pos());
+            // 过滤 NaN/Inf 坐标（新出现的视口在指针首次进入前可能给出非有限值）
+            let pointer = ui
+                .input(|i| i.pointer.interact_pos())
+                .filter(|p| p.is_finite());
             // 注意：这里必须是「刚刚按下」；用 primary_down 会在按住的每一帧
             // 重复触发按下分支，把拖拽起点不断重置，框选永远出不来。
             let pressed = ui.input(|i| i.pointer.primary_pressed());
@@ -857,6 +847,12 @@ enum ToolAction {
 fn toolbar_rect_for(sel: egui::Rect, tile_rect: egui::Rect) -> egui::Rect {
     const H: f32 = 36.0;
     const W: f32 = 420.0;
+    if !sel.is_finite() || !tile_rect.is_finite() {
+        diag(format!(
+            "工具栏矩形含非有限值：sel={sel:?} tile={tile_rect:?}"
+        ));
+        return egui::Rect::NOTHING;
+    }
     let x = (sel.center().x - W / 2.0).clamp(tile_rect.min.x, tile_rect.max.x - W);
     let y = if sel.min.y - H - 8.0 >= tile_rect.min.y {
         sel.min.y - H - 8.0
@@ -878,6 +874,9 @@ fn draw_toolbar(
     use shadcn_egui::icons::lucide;
 
     let mut action = ToolAction::None;
+    if !toolbar_rect.is_positive() {
+        return action;
+    }
     let area = egui::Area::new(egui::Id::new("screenshot-toolbar"))
         .fixed_pos(toolbar_rect.min - tile_rect.min.to_vec2());
     let theme = shadcn_egui::Theme::current(ui.ctx());
