@@ -34,6 +34,7 @@ fn main() -> eframe::Result {
         .filter_level(log::LevelFilter::Info)
         .parse_default_env()
         .init();
+    macos::install_app_icon();
 
     let (tx, rx) = mpsc::channel();
     let shared_ctx: SharedCtx = Arc::new(Mutex::new(None));
@@ -48,13 +49,15 @@ fn main() -> eframe::Result {
     spawn_sampler(sink.clone(), shared.clone());
     spawn_clipboard_watcher(sink.clone(), shared.clone());
 
+    let window_icon = window_icon();
     eframe::run_native(
         "MyMac",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title("MyMac")
                 .with_inner_size([960.0, 640.0])
-                .with_min_inner_size([820.0, 560.0]),
+                .with_min_inner_size([820.0, 560.0])
+                .with_icon(window_icon),
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()
         },
@@ -64,6 +67,25 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::MyMacApp::new(rx, sink, shared, tray)))
         }),
     )
+}
+
+/// 主窗口图标（复用打包好的 icon.png）。
+fn window_icon() -> egui::IconData {
+    const PNG: &[u8] = include_bytes!("../assets/icon.png");
+    match image::load_from_memory(PNG) {
+        Ok(image) => {
+            let rgba = image.to_rgba8();
+            egui::IconData {
+                width: rgba.width(),
+                height: rgba.height(),
+                rgba: rgba.into_raw(),
+            }
+        }
+        Err(error) => {
+            log::warn!("加载窗口图标失败：{error}");
+            egui::IconData::default()
+        }
+    }
 }
 
 /// 每 2 秒采样一次系统信息，并通知主线程刷新托盘与资源监控页。

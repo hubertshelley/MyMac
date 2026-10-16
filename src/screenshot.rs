@@ -15,6 +15,27 @@ use eframe::egui::{self, RichText};
 use mymac_core::screenshot::capture::{self, DisplayInfo};
 use mymac_core::screenshot::winlist::{self, CaptureWindow};
 
+/// 追加一行诊断日志到 ~/Library/Logs/MyMac.log（.app 方式启动时 stderr 不可见）。
+pub fn diag(msg: impl AsRef<str>) {
+    let text = msg.as_ref();
+    log::info!("{text}");
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = std::path::Path::new(&home).join("Library/Logs/MyMac.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let _ = writeln!(f, "[{now}] {text}");
+        }
+    }
+}
+
 /// 标注颜色板
 const COLORS: [[u8; 4]; 5] = [
     [229, 72, 77, 255],
@@ -229,17 +250,19 @@ impl ScreenshotManager {
     /// 触发截图（F1 / 托盘；覆盖层已存在时重新抓屏替换会话）。
     /// 抓屏（CGDisplayCreateImage）必须在主线程，logic() 即主线程。
     pub fn start(&mut self, ctx: &egui::Context) {
+        diag("截图触发");
         if !capture::has_screen_capture_access() {
+            diag("屏幕录制权限未授予，请求系统授权后本次跳过（授权后需重启应用）");
             capture::request_screen_capture_access();
-            log::warn!("屏幕录制权限未授予，已请求系统授权");
             return;
         }
         let displays = capture::active_displays();
         if displays.is_empty() {
-            log::warn!("未枚举到任何显示器，无法截图");
+            diag("未枚举到任何显示器，无法截图");
             return;
         }
         self.displays = displays.clone();
+        diag(format!("枚举到 {} 块显示器，开始抓屏", displays.len()));
 
         let windows = winlist::list_on_screen_windows();
         let mut tiles = Vec::with_capacity(displays.len());
@@ -272,10 +295,12 @@ impl ScreenshotManager {
             }
         }
         if tiles.is_empty() {
+            diag("抓屏结果为空，覆盖层未显示");
             return;
         }
 
         let id_list: Vec<egui::ViewportId> = tiles.iter().map(|t| t.viewport_id()).collect();
+        diag(format!("覆盖层视口显示：{:?} ", id_list));
         {
             let mut overlay = self.overlay.lock().unwrap();
             overlay.tiles = tiles;
@@ -406,7 +431,10 @@ fn overlay_viewport(
             );
 
             let pointer = ui.input(|i| i.pointer.interact_pos());
-            let pressed = ui.input(|i| i.pointer.primary_down());
+            // 注意：这里必须是「刚刚按下」；用 primary_down 会在按住的每一帧
+            // 重复触发按下分支，把拖拽起点不断重置，框选永远出不来。
+            let pressed = ui.input(|i| i.pointer.primary_pressed());
+            let held = ui.input(|i| i.pointer.primary_down());
             let released = ui.input(|i| i.pointer.primary_released());
 
             // ---- 选区 / 标注交互（工具栏区域除外）----
@@ -423,7 +451,7 @@ fn overlay_viewport(
             if let Some(pos) = pointer_global
                 && !on_toolbar
             {
-                handle_selection_input(&mut overlay, pos, pressed, released, hover);
+                handle_selection_input(&mut overlay, pos, pressed, held, released, hover);
                 handle_draw_input(&mut overlay, pos, pressed, released);
             } else if released {
                 overlay.origin = None;
@@ -548,6 +576,7 @@ fn handle_selection_input(
     overlay: &mut Overlay,
     pos: egui::Pos2,
     pressed: bool,
+    held: bool,
     released: bool,
     hover: Option<egui::Rect>,
 ) {
@@ -569,15 +598,16 @@ fn handle_selection_input(
         overlay.selection = None;
         overlay.shapes.clear();
     }
-    if overlay.handle.is_some()
+    if held
+        && overlay.handle.is_some()
         && let Some(sel) = overlay.selection
         && let Some(handle) = overlay.handle
     {
         overlay.selection = Some(apply_handle(sel, handle, pos));
-    } else if let Some((start, base)) = overlay.move_ref {
+    } else if held && let Some((start, base)) = overlay.move_ref {
         let delta = pos - start;
         overlay.selection = Some(base.translate(delta));
-    } else if let Some(origin) = overlay.origin {
+    } else if held && let Some(origin) = overlay.origin {
         let rect = egui::Rect::from_two_pos(origin, pos);
         overlay.selection = Some(rect);
         if released {
