@@ -499,11 +499,11 @@ fn overlay_viewport(
             };
             let painter = ui.painter();
 
-            // 冻结背景
+            // 冻结背景（uv 必须归一化到 0..1，否则越界采样导致整屏取到边缘 texel 而变色/失真）
             painter.image(
                 texture_id,
                 ui.max_rect(),
-                egui::Rect::from_min_size(egui::Pos2::ZERO, tile_rect.size()),
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
 
