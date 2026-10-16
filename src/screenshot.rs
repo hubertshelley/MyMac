@@ -180,6 +180,7 @@ struct Overlay {
 impl Overlay {
     fn hide_all(&mut self, ctx: &egui::Context) {
         let ids: Vec<egui::ViewportId> = self.tiles.iter().map(|t| t.viewport_id()).collect();
+        diag("覆盖层关闭");
         self.visible = false;
         self.origin = None;
         self.selection = None;
@@ -217,8 +218,11 @@ impl Overlay {
 /// 截图管理器：主线程持有，负责抓屏与视口注册。
 pub struct ScreenshotManager {
     overlay: Arc<Mutex<Overlay>>,
-    /// 已注册覆盖层视口的显示器（ui 每帧按这个列表注册）
+    /// 已枚举的显示器（ui 每帧按这个列表检查注册）
     displays: Vec<DisplayInfo>,
+    /// 已注册过视口的显示器 id（每个显示器只注册一次，
+    /// 避免每帧重建视口把 ViewportCommand 设置的可见性覆盖掉）
+    registered: std::collections::HashSet<u32>,
     /// OCR 识别状态：None=未在识别，Some(Err/Ok)=已完成
     ocr: Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
 }
@@ -243,6 +247,7 @@ impl ScreenshotManager {
                 move_ref: None,
             })),
             displays: capture::active_displays(),
+            registered: std::collections::HashSet::new(),
             ocr: Arc::new(Mutex::new(None)),
         }
     }
@@ -324,10 +329,14 @@ impl ScreenshotManager {
         log::info!("截图覆盖层已显示（{} 块屏幕）", self.displays.len());
     }
 
-    /// 主窗口可见期间每帧注册覆盖层视口（隐藏态），显隐全部由 ViewportCommand 驱动。
+    /// 主窗口可见期间检查覆盖层视口注册（隐藏态），显隐全部由 ViewportCommand 驱动。
     pub fn register(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         for display in &self.displays {
+            if !self.registered.insert(display.id) {
+                continue;
+            }
+            diag(format!("注册覆盖层视口 display={}", display.id));
             let id = viewport_id(display.id);
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("screenshot-overlay-{}", display.id))
@@ -397,6 +406,17 @@ fn overlay_viewport(
     ocr: &Arc<Mutex<Option<Result<mymac_core::ocr::OcrResult, String>>>>,
     ui: &mut egui::Ui,
 ) {
+    use std::collections::HashSet;
+    use std::sync::OnceLock;
+    static RENDER_LOGGED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    if RENDER_LOGGED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(display_id)
+    {
+        diag(format!("覆盖层视口首帧渲染 display={display_id}"));
+    }
     let ctx = ui.ctx().clone();
     let mut finish = false;
     let mut copy_sel: Option<egui::Rect> = None;
