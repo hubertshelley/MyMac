@@ -69,6 +69,18 @@
 - [x] 前端：识别结果浮层（按行展示、复制全部/单行、关闭/复制并完成）
 - [x] 编译验证（cargo check + 前端 build）
 
+## 当前阶段（egui 迁移与截图增强）
+
+方案见 `docs/egui-migration.md`，分支 `feature/egui-rewrite`。
+
+- [x] M0 技术验证（`poc/egui-poc`）：托盘、F1、覆盖层、Dock 显隐、中文与图标渲染均通过
+- [ ] M1 core 抽离：建 workspace，业务模块迁入 `mymac-core`，去掉 Tauri 类型，Tauri 版暂时依赖 core 继续可用
+- [ ] M2 应用骨架 / M3 管理页面 / M4 Homebrew
+- [ ] M5 截图：新增两项需求（依赖 M5 覆盖层，详见 `docs/requirements.md` 第 9 节）
+  - [ ] 整屏截图：悬停无窗口区域高亮整屏，单击选中整屏
+  - [ ] 重复触发：覆盖层任意状态下再触发，重新抓屏，新背景含现有选区与标注，替换旧会话
+- [ ] M6 贴图 / M7 打包切换（Bundle ID `com.hubertshelley.mymac` + Developer ID 签名与公证）
+
 ## 后续阶段（v0.2）
 
 - [ ] 应用占用空间精确计算与缓存清理
