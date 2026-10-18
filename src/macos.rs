@@ -94,6 +94,39 @@ pub fn set_level_titled_prefix(title_prefix: &str, level: isize) {
     }
 }
 
+/// 贴图窗口真正「始终置顶」：egui 的 always_on_top 只是 Floating 级（3），
+/// 会被 Dock、其他应用浮动面板盖住，且窗口只属于创建时的桌面空间。
+/// 这里提到 NSStatusWindowLevel（25，与旧版一致，低于截图覆盖层 1000），
+/// 并加入所有桌面空间、允许叠在全屏应用上、不进 ⌘Tab / 窗口循环。
+/// 只在值不同时写入，可每帧调用。
+pub fn pin_windows_titled_prefix(title_prefix: &str) {
+    use objc2_app_kit::NSWindowCollectionBehavior as B;
+    const NS_STATUS_WINDOW_LEVEL: isize = 25;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let wanted = B::CanJoinAllSpaces | B::FullScreenAuxiliary | B::IgnoresCycle;
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows() {
+        if !window.title().to_string().starts_with(title_prefix) {
+            continue;
+        }
+        if window.level() != NS_STATUS_WINDOW_LEVEL {
+            window.setLevel(NS_STATUS_WINDOW_LEVEL);
+            crate::screenshot::diag(format!(
+                "贴图窗口置顶：{} level={} behavior={:#x}",
+                window.title(),
+                window.level(),
+                (window.collectionBehavior() | wanted).0
+            ));
+        }
+        let behavior = window.collectionBehavior();
+        if !behavior.contains(wanted) {
+            window.setCollectionBehavior(behavior | wanted);
+        }
+    }
+}
+
 /// 显式设置 Dock / 应用图标。Info.plist 的 icns 在部分启动方式下不生效，
 /// 统一在启动时用打包好的 icon.png 设置一次。
 pub fn install_app_icon() {

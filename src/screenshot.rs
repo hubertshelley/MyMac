@@ -519,6 +519,10 @@ impl ScreenshotManager {
                 .map(|p| (p.id, p.pos, p.size()))
                 .collect()
         };
+        // 贴图窗口在声明后的下一帧才创建，每个 pass 补设层级与空间行为（幂等）
+        if !pins.is_empty() {
+            crate::macos::pin_windows_titled_prefix("screenshot-pin-");
+        }
         for (id, pos, size) in pins {
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("screenshot-pin-{id}"))
