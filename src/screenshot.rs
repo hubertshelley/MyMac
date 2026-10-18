@@ -1994,7 +1994,7 @@ fn crop_selection(tile: &Tile, sel: egui::Rect) -> Option<(usize, usize, Vec<u8>
     Some((width, height, out))
 }
 
-/// 贴图视口每帧渲染与交互：拖动移动、滚轮缩放（每格 ×1.1）、
+/// 贴图视口每帧渲染与交互：拖动移动、滚轮缩放（每格 ×1.1）/ 触控板双指捏合缩放、
 /// 双击 / Esc / 悬停关闭按钮关闭、右键菜单（复制到剪贴板 / 关闭贴图）。
 #[allow(clippy::too_many_lines)]
 fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
@@ -2087,25 +2087,30 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
                 ctx.set_cursor_icon(egui::CursorIcon::Grab);
             }
 
-            // 滚轮缩放：按原始滚轮事件计格（每格 ×1.1），触控板按像素折算
-            let steps: f32 = ui.input(|i| {
+            // 缩放倍数：滚轮按原始事件计格（每格 ×1.1，触控板滚动按像素折算），
+            // 触控板双指捏合是 Event::Zoom（winit PinchGesture，已是乘法因子），两者相乘
+            let factor: f32 = ui.input(|i| {
                 i.events
                     .iter()
                     .filter_map(|event| match event {
-                        egui::Event::MouseWheel { unit, delta, .. } => Some(match unit {
-                            egui::MouseWheelUnit::Line => delta.y,
-                            egui::MouseWheelUnit::Point => delta.y / 40.0,
-                            egui::MouseWheelUnit::Page => delta.y * 3.0,
-                        }),
+                        egui::Event::MouseWheel { unit, delta, .. } => {
+                            let steps = match unit {
+                                egui::MouseWheelUnit::Line => delta.y,
+                                egui::MouseWheelUnit::Point => delta.y / 40.0,
+                                egui::MouseWheelUnit::Page => delta.y * 3.0,
+                            };
+                            Some(1.1_f32.powf(steps))
+                        }
+                        egui::Event::Zoom(zoom) => Some(*zoom),
                         _ => None,
                     })
-                    .sum()
+                    .product()
             });
-            if response.hovered() && steps.abs() > f32::EPSILON {
+            if response.hovered() && (factor - 1.0).abs() > f32::EPSILON {
                 let mut overlay = state.lock().unwrap();
                 if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
                     let center = pin.pos + pin.size() * 0.5;
-                    pin.set_zoom(pin.zoom * 1.1_f32.powf(steps));
+                    pin.set_zoom(pin.zoom * factor);
                     pin.pos = center - pin.size() * 0.5;
                     // 以中心为锚：尺寸由下次声明更新，位置需显式移动
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pin.pos));
