@@ -7,33 +7,89 @@ use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage};
 use objc2_foundation::NSData;
 
-/// 把指定标题前缀的窗口临时移出屏幕（orderOut），返回是否存在窗口。
+/// 把指定标题前缀的窗口移出屏幕（orderOut），返回其中是否有正在显示的窗口。
 /// 截图重触发时先移走旧覆盖层，避免把覆盖层自己抓进冻结背景。
 pub fn order_out_titled_prefix(title_prefix: &str) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let mut found = false;
+    let mut visible = false;
     for window in app.windows() {
         if window.title().to_string().starts_with(title_prefix) {
+            visible |= window.isVisible();
             window.orderOut(None);
-            found = true;
         }
     }
-    found
+    visible
+}
+
+/// 激活本应用。托盘常驻（Accessory）时不激活的话，覆盖层和保存面板拿不到键盘焦点，
+/// Esc / Enter 都不生效。
+#[allow(deprecated)] // activateIgnoringOtherApps 在 macOS 14 标记弃用，但仍是 Accessory 应用唯一可靠的方式
+pub fn activate_app() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+}
+
+/// 交还焦点给之前的前台应用（截图结束且主窗口未显示时调用）。
+pub fn deactivate_app() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    NSApplication::sharedApplication(mtm).deactivate();
+}
+
+/// 主窗口（标题 MyMac）当前是否可见。
+pub fn main_window_visible() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows() {
+        if window.title().to_string() == "MyMac" && window.isVisible() {
+            return true;
+        }
+    }
+    false
+}
+
+/// 直接移出 / 恢复主窗口（截图前移出，避免把主窗口截进去；结束后恢复）。
+/// 走 AppKit 而不是 egui 命令：egui 命令要到下一帧才生效，而抓屏必须马上进行。
+pub fn order_main_window(front: bool) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows() {
+        if window.title().to_string() == "MyMac" {
+            if front {
+                window.orderFrontRegardless();
+            } else {
+                window.orderOut(None);
+            }
+        }
+    }
 }
 
 /// 把指定标题前缀的窗口提到最高层级（screenSaver 级，覆盖 Dock）。
 /// 截图覆盖层用：普通 always-on-top 会被 Dock 盖住。
 pub fn raise_windows_titled_prefix(title_prefix: &str) {
+    set_level_titled_prefix(title_prefix, 1000); // kCGScreenSaverWindowLevel
+}
+
+/// 设置指定标题前缀窗口的层级。保存对话框弹出前先把覆盖层降到普通层级（0），
+/// 否则 NSSavePanel（模态面板层级 8）会被 screenSaver 级覆盖层挡住。
+pub fn set_level_titled_prefix(title_prefix: &str, level: isize) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
     for window in app.windows() {
         if window.title().to_string().starts_with(title_prefix) {
-            window.setLevel(1000); // kCGScreenSaverWindowLevel
+            window.setLevel(level);
         }
     }
 }
