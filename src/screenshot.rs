@@ -126,21 +126,52 @@ struct PinImage {
     pos: egui::Pos2,
     /// 创建窗口时的初始位置（只在首次声明时用一次）
     initial_pos: Option<egui::Pos2>,
-    /// 初始显示尺寸：与选区相同的逻辑尺寸（1:1，不做缩放）
+    /// 初始显示尺寸：与选区 1:1；超出屏幕 PIN_FIT_RATIO 时等比缩小（宽高比始终与截图一致）
     base: egui::Vec2,
-    /// 缩放倍率（PIN_ZOOM_RANGE 内）
+    /// 缩放倍率（PIN_ZOOM_RANGE 内，且不超过 max_size）
     zoom: f32,
+    /// 所在显示器的逻辑尺寸：放大上限（macOS 会把超出屏幕的窗口压扁，破坏宽高比）
+    max_size: egui::Vec2,
 }
 
 impl PinImage {
     fn size(&self) -> egui::Vec2 {
         self.base * self.zoom
     }
+
+    /// 按倍率缩放：base 等比乘倍率，宽高比恒定；上限为整张贴图放进屏幕
+    fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = clamp_pin_zoom(self.base, self.max_size, zoom);
+    }
 }
 
-/// 贴图初始尺寸：与选区同样大小（物理像素按屏幕缩放换算为逻辑尺寸，1:1 显示）。
-fn pin_base_size(px_w: usize, px_h: usize, scale: f32) -> egui::Vec2 {
-    egui::vec2(px_w as f32 / scale, px_h as f32 / scale)
+/// 贴图倍率上限：PIN_ZOOM_RANGE 与「整张贴图放进屏幕」两者取小。
+fn clamp_pin_zoom(base: egui::Vec2, max_size: egui::Vec2, zoom: f32) -> f32 {
+    let fit_max = (max_size.x / base.x).min(max_size.y / base.y);
+    let upper = PIN_ZOOM_RANGE.1.min(fit_max).max(PIN_ZOOM_RANGE.0);
+    zoom.clamp(PIN_ZOOM_RANGE.0, upper)
+}
+
+/// 贴图超过屏幕该比例（任一边）时等比缩小到该比例以内（全屏截图等）。
+const PIN_FIT_RATIO: f32 = 0.8;
+
+/// 贴图初始尺寸：与选区同样大小（物理像素按屏幕缩放换算为逻辑尺寸）；
+/// 任一边超出屏幕 PIN_FIT_RATIO 时两边按同一比例缩小，保持截图宽高比。
+fn pin_base_size(px_w: usize, px_h: usize, scale: f32, screen: egui::Vec2) -> egui::Vec2 {
+    let logical = egui::vec2(px_w as f32 / scale, px_h as f32 / scale);
+    let limit = screen * PIN_FIT_RATIO;
+    let fit = (limit.x / logical.x).min(limit.y / logical.y).min(1.0);
+    logical * fit
+}
+
+/// 在 rect 内居中放置宽高比为 aspect（宽/高）的最大矩形。
+fn fit_aspect(rect: egui::Rect, aspect: f32) -> egui::Rect {
+    let size = if rect.width() / rect.height() > aspect {
+        egui::vec2(rect.height() * aspect, rect.height())
+    } else {
+        egui::vec2(rect.width(), rect.width() / aspect)
+    };
+    egui::Rect::from_center_size(rect.center(), size)
 }
 
 /// 标注文字的离线栅格化（共享一次字体加载）。
@@ -996,11 +1027,11 @@ fn create_pin(
         return false;
     };
     let mut overlay = state.lock().unwrap();
-    let scale = overlay
+    let (scale, screen) = overlay
         .tiles
         .iter()
         .find(|t| t.display_id == display_id)
-        .map_or(1.0, |t| t.scale) as f32;
+        .map_or((1.0, sel.size()), |t| (t.scale as f32, t.rect.size()));
     overlay.pin_seq += 1;
     let id = overlay.pin_seq;
     let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
@@ -1009,16 +1040,19 @@ fn create_pin(
         image,
         egui::TextureOptions::LINEAR,
     );
-    let base = pin_base_size(w, h, scale);
+    let base = pin_base_size(w, h, scale, screen);
+    // 等比缩小后以原选区中心为锚，贴图仍落在截图位置附近
+    let pos = sel.center() - base * 0.5;
     overlay.pins.push(PinImage {
         id,
         texture,
         rgba: Arc::new(rgba),
         px_size: [w, h],
-        pos: sel.min,
-        initial_pos: Some(sel.min),
+        pos,
+        initial_pos: Some(pos),
         base,
         zoom: 1.0,
+        max_size: screen,
     });
     diag(format!("贴图已创建 id={id} size={base:?}"));
     true
@@ -1973,9 +2007,9 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
             .pins
             .iter()
             .find(|p| p.id == pin_id)
-            .map(|p| p.texture.id())
+            .map(|p| (p.texture.id(), p.px_size[0] as f32 / p.px_size[1] as f32))
     };
-    let Some(texture_id) = snapshot else {
+    let Some((texture_id, aspect)) = snapshot else {
         ctx.send_viewport_cmd_to(pin_viewport_id(pin_id), egui::ViewportCommand::Close);
         return;
     };
@@ -1996,7 +2030,8 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show_inside(ui, |ui| {
-            let rect = ui.max_rect();
+            // 图片按截图宽高比绘制：窗口尺寸在缩放过渡帧或被系统约束时与贴图不一致，也不会拉伸变形
+            let rect = fit_aspect(ui.max_rect(), aspect);
             let response = ui.interact(
                 rect,
                 egui::Id::new(("screenshot-pin-body", pin_id)),
@@ -2070,8 +2105,7 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
                 let mut overlay = state.lock().unwrap();
                 if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
                     let center = pin.pos + pin.size() * 0.5;
-                    pin.zoom =
-                        (pin.zoom * 1.1_f32.powf(steps)).clamp(PIN_ZOOM_RANGE.0, PIN_ZOOM_RANGE.1);
+                    pin.set_zoom(pin.zoom * 1.1_f32.powf(steps));
                     pin.pos = center - pin.size() * 0.5;
                     // 以中心为锚：尺寸由下次声明更新，位置需显式移动
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pin.pos));
@@ -2117,5 +2151,52 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
         state.lock().unwrap().pins.retain(|p| p.id != pin_id);
         diag(format!("贴图已关闭 id={pin_id}"));
         ctx.send_viewport_cmd_to(pin_viewport_id(pin_id), egui::ViewportCommand::Close);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn aspect(v: egui::Vec2) -> f32 {
+        v.x / v.y
+    }
+
+    #[test]
+    fn pin_base_size_keeps_small_selection_one_to_one() {
+        let screen = egui::vec2(1512.0, 982.0);
+        // 2x 屏，600×400 物理像素 → 300×200 逻辑，远小于屏幕 80%
+        assert_eq!(
+            pin_base_size(600, 400, 2.0, screen),
+            egui::vec2(300.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn pin_base_size_shrinks_full_screen_keeping_aspect() {
+        let screen = egui::vec2(1512.0, 982.0);
+        let base = pin_base_size(3024, 1964, 2.0, screen);
+        assert!(base.x <= screen.x * PIN_FIT_RATIO + 0.01);
+        assert!(base.y <= screen.y * PIN_FIT_RATIO + 0.01);
+        assert!((aspect(base) - 3024.0 / 1964.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pin_zoom_keeps_aspect_and_stays_on_screen() {
+        let screen = egui::vec2(1512.0, 982.0);
+        let base = pin_base_size(3024, 1964, 2.0, screen);
+        for zoom in [0.01, 0.5, 1.0, 1.7, 100.0] {
+            let size = base * clamp_pin_zoom(base, screen, zoom);
+            assert!((aspect(size) - aspect(base)).abs() < 1e-4, "zoom={zoom}");
+            assert!(size.x <= screen.x + 0.01 && size.y <= screen.y + 0.01);
+        }
+    }
+
+    #[test]
+    fn fit_aspect_letterboxes_without_stretch() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 100.0));
+        let fitted = fit_aspect(rect, 2.0);
+        assert_eq!(fitted.size(), egui::vec2(200.0, 100.0));
+        assert_eq!(fitted.center(), rect.center());
     }
 }
