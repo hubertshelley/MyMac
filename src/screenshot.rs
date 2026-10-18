@@ -47,8 +47,6 @@ const COLORS: [[u8; 4]; 6] = [
     [255, 255, 255, 255],
     [17, 17, 17, 255],
 ];
-/// 贴图初始显示尺寸上限（逻辑像素，超出时等比缩小）
-const PIN_MAX_SIZE: egui::Vec2 = egui::vec2(1100.0, 760.0);
 /// 贴图缩放倍率范围（相对初始尺寸）
 const PIN_ZOOM_RANGE: (f32, f32) = (0.12, 6.0);
 /// 提示 toast 显示时长（秒）
@@ -124,14 +122,14 @@ struct PinImage {
     /// 原始像素（右键「复制到粘贴板」用）
     rgba: Arc<Vec<u8>>,
     px_size: [usize; 2],
-    /// 窗口位置（全局逻辑坐标）
+    /// 窗口位置（全局逻辑坐标，跟随系统拖动回写）
     pos: egui::Pos2,
-    /// 初始显示尺寸（已限制在 PIN_MAX_SIZE 内并保持比例）
+    /// 创建窗口时的初始位置（只在首次声明时用一次）
+    initial_pos: Option<egui::Pos2>,
+    /// 初始显示尺寸：与选区相同的逻辑尺寸（1:1，不做缩放）
     base: egui::Vec2,
     /// 缩放倍率（PIN_ZOOM_RANGE 内）
     zoom: f32,
-    /// 拖动起点（全局逻辑坐标）
-    drag_ref: Option<egui::Pos2>,
 }
 
 impl PinImage {
@@ -140,13 +138,9 @@ impl PinImage {
     }
 }
 
-/// 贴图初始尺寸：物理像素按缩放换算为逻辑尺寸，超出上限时等比缩小。
+/// 贴图初始尺寸：与选区同样大小（物理像素按屏幕缩放换算为逻辑尺寸，1:1 显示）。
 fn pin_base_size(px_w: usize, px_h: usize, scale: f32) -> egui::Vec2 {
-    let logical = egui::vec2(px_w as f32 / scale, px_h as f32 / scale);
-    let fit = (PIN_MAX_SIZE.x / logical.x)
-        .min(PIN_MAX_SIZE.y / logical.y)
-        .min(1.0);
-    logical * fit
+    egui::vec2(px_w as f32 / scale, px_h as f32 / scale)
 }
 
 /// 标注文字的离线栅格化（共享一次字体加载）。
@@ -157,25 +151,32 @@ struct TextRaster {
 
 impl TextRaster {
     fn new() -> Option<Self> {
-        const CANDIDATES: [&str; 6] = [
+        // 中文字体只加载第一个可用的：每个 CJK 字体 20～50 MB、上万字形，
+        // fontdue 解析很慢，全部加载会让输出卡住好几秒。
+        const CJK: [&str; 4] = [
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
             "/System/Library/Fonts/STHeiti Medium.ttc",
             "/System/Library/Fonts/STHeiti Light.ttc",
+        ];
+        const LATIN: [&str; 2] = [
             "/System/Library/Fonts/SFNS.ttf",
             "/System/Library/Fonts/Helvetica.ttc",
         ];
-        let fonts: Vec<fontdue::Font> = CANDIDATES
+        let load = |path: &&str| -> Option<fontdue::Font> {
+            let bytes = std::fs::read(path).ok()?;
+            // ttc 是字体集合：取第 0 个字体
+            let settings = fontdue::FontSettings {
+                collection_index: 0,
+                ..fontdue::FontSettings::default()
+            };
+            fontdue::Font::from_bytes(bytes, settings).ok()
+        };
+        let fonts: Vec<fontdue::Font> = CJK
             .iter()
-            .filter_map(|path| std::fs::read(path).ok())
-            .filter_map(|bytes| {
-                // ttc 是字体集合：取第 0 个字体
-                let settings = fontdue::FontSettings {
-                    collection_index: 0,
-                    ..fontdue::FontSettings::default()
-                };
-                fontdue::Font::from_bytes(bytes, settings).ok()
-            })
+            .find_map(load)
+            .into_iter()
+            .chain(LATIN.iter().find_map(load))
             .collect();
         if fonts.is_empty() {
             diag("未找到可用于标注栅格化的系统字体");
@@ -410,6 +411,7 @@ impl ScreenshotManager {
             return;
         }
         self.displays = displays.clone();
+        prewarm_text_raster();
         diag(format!("枚举到 {} 块显示器，开始抓屏", displays.len()));
 
         let windows = winlist::list_on_screen_windows();
@@ -511,12 +513,14 @@ impl ScreenshotManager {
             });
         }
         // 贴图视口：独立于覆盖层常驻，同样每个 pass 重新声明（deferred 视口必须每帧重声明）
-        let pins: Vec<(u32, egui::Pos2, egui::Vec2)> = {
-            let overlay = self.overlay.lock().unwrap();
+        let pins: Vec<(u32, Option<egui::Pos2>, egui::Vec2)> = {
+            let mut overlay = self.overlay.lock().unwrap();
             overlay
                 .pins
-                .iter()
-                .map(|p| (p.id, p.pos, p.size()))
+                .iter_mut()
+                // 位置只在创建时给一次；之后窗口由系统拖动、缩放时显式发 OuterPosition，
+                // 每帧都带位置会和系统拖动抢窗口位置
+                .map(|p| (p.id, p.initial_pos.take(), p.size()))
                 .collect()
         };
         // 贴图窗口在声明后的下一帧才创建，每个 pass 补设层级与空间行为（幂等）
@@ -524,15 +528,17 @@ impl ScreenshotManager {
             crate::macos::pin_windows_titled_prefix("screenshot-pin-");
         }
         for (id, pos, size) in pins {
-            let builder = egui::ViewportBuilder::default()
+            let mut builder = egui::ViewportBuilder::default()
                 .with_title(format!("screenshot-pin-{id}"))
                 .with_visible(true)
                 .with_transparent(true)
                 .with_decorations(false)
                 .with_always_on_top()
                 .with_resizable(false)
-                .with_position(pos)
                 .with_inner_size([size.x, size.y]);
+            if let Some(pos) = pos {
+                builder = builder.with_position(pos);
+            }
             let state = self.overlay.clone();
             ctx.show_viewport_deferred(
                 pin_viewport_id(id),
@@ -1010,9 +1016,9 @@ fn create_pin(
         rgba: Arc::new(rgba),
         px_size: [w, h],
         pos: sel.min,
+        initial_pos: Some(sel.min),
         base,
         zoom: 1.0,
-        drag_ref: None,
     });
     diag(format!("贴图已创建 id={id} size={base:?}"));
     true
@@ -1786,7 +1792,6 @@ fn compose(
     let scale = tile.scale as f32;
 
     // 标注栅格化：叠加到选区像素上
-    let raster = overlay_text_raster();
     let px_w = crop.0;
     let px_h = crop.1;
     let shapes: Vec<Shape> = overlay.shapes.clone();
@@ -1838,6 +1843,8 @@ fn compose(
                 }
             }
             Tool::Text => {
+                // 只有文字标注才需要字体（加载较慢，已在截图开始时后台预热）
+                let raster = overlay_text_raster();
                 let raster_guard = raster.lock().unwrap();
                 if let Some(raster) = raster_guard.as_ref()
                     && !shape.text.is_empty()
@@ -1868,6 +1875,21 @@ fn overlay_text_raster() -> Arc<Mutex<Option<TextRaster>>> {
     RASTER
         .get_or_init(|| Arc::new(Mutex::new(TextRaster::new())))
         .clone()
+}
+
+/// 后台预热文字栅格化器（只执行一次），避免第一次输出带文字的截图时卡顿。
+fn prewarm_text_raster() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::thread::spawn(|| {
+            let started = std::time::Instant::now();
+            let ok = overlay_text_raster().lock().unwrap().is_some();
+            diag(format!(
+                "标注字体预热完成 ok={ok} 耗时 {} ms",
+                started.elapsed().as_millis()
+            ));
+        });
+    });
 }
 
 /// 粗线段：沿线段等距填充圆点。
@@ -1951,12 +1973,23 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
             .pins
             .iter()
             .find(|p| p.id == pin_id)
-            .map(|p| (p.texture.id(), p.pos))
+            .map(|p| p.texture.id())
     };
-    let Some((texture_id, pin_pos)) = snapshot else {
+    let Some(texture_id) = snapshot else {
         ctx.send_viewport_cmd_to(pin_viewport_id(pin_id), egui::ViewportCommand::Close);
         return;
     };
+    // 系统拖动后以真实窗口位置为准回写，避免下次声明 / 缩放时把窗口拉回旧位置
+    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect)
+        && outer.min.is_finite()
+    {
+        let mut overlay = state.lock().unwrap();
+        if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id)
+            && pin.pos.distance(outer.min) > 0.5
+        {
+            pin.pos = outer.min;
+        }
+    }
     let mut close = false;
     let mut copy = false;
 
@@ -2007,32 +2040,11 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
                 );
             }
 
-            // 拖动移动：指针换算为「窗口位置 + 局部坐标」的全局坐标，
-            // 窗口跟随光标移动时局部坐标会漂移，按全局增量移动才不抖动 / 跑飞。
-            let pointer_global = ui
-                .input(|i| i.pointer.interact_pos())
-                .filter(|p| p.is_finite())
-                .map(|p| p + pin_pos.to_vec2());
+            // 拖动移动：交给系统原生拖动窗口（StartDrag），不再自己算位移。
+            // 之前用「state 位置 + 局部坐标」推算全局坐标，但窗口位置要等根视口下一个 pass
+            // 才更新，state 与真实窗口脱节形成正反馈：一按住窗口就持续漂移飞出屏幕（看起来是点一下就消失）。
             if response.drag_started() {
-                let mut overlay = state.lock().unwrap();
-                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
-                    pin.drag_ref = pointer_global;
-                }
-            } else if response.dragged() {
-                let mut overlay = state.lock().unwrap();
-                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id)
-                    && let (Some(start), Some(cur)) = (pin.drag_ref, pointer_global)
-                {
-                    pin.pos += cur - start;
-                    pin.drag_ref = Some(cur);
-                }
-            }
-            if response.drag_stopped() {
-                let mut overlay = state.lock().unwrap();
-                if let Some(pin) = overlay.pins.iter_mut().find(|p| p.id == pin_id) {
-                    pin.drag_ref = None;
-                }
-                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
             if response.dragged() {
                 ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -2061,6 +2073,9 @@ fn pin_viewport(pin_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui::Ui) {
                     pin.zoom =
                         (pin.zoom * 1.1_f32.powf(steps)).clamp(PIN_ZOOM_RANGE.0, PIN_ZOOM_RANGE.1);
                     pin.pos = center - pin.size() * 0.5;
+                    // 以中心为锚：尺寸由下次声明更新，位置需显式移动
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pin.pos));
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
                 }
             }
 
