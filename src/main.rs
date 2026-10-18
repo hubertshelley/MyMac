@@ -48,6 +48,15 @@ fn main() -> eframe::Result {
     }));
     macos::install_app_icon();
 
+    // Bundle ID 切换（com.mymac.manager → com.hubertshelley.mymac）后的一次性缓存迁移
+    match mymac_core::paths::migrate_legacy_cache() {
+        Ok(mymac_core::paths::CacheMigration::Moved) => {
+            crate::screenshot::diag("已把旧缓存目录迁移到新 Bundle ID 下");
+        }
+        Ok(_) => {}
+        Err(error) => crate::screenshot::diag(format!("缓存迁移失败（不影响使用）：{error}")),
+    }
+
     let (tx, rx) = mpsc::channel();
     let shared_ctx: SharedCtx = Arc::new(Mutex::new(None));
     let sink = UiSink::new(tx, shared_ctx.clone());

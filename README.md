@@ -15,7 +15,8 @@ Cargo.toml            # 应用 crate + workspace
 src/                  # egui 应用：main / app / theme / tray / hotkey / event / macos
 crates/mymac-core/    # 业务内核（system、apps、launch、brew、clipboard、totp、ocr、screenshot 后端）
 assets/               # 应用图标
-scripts/dev-bundle.sh # 开发打包为 build/MyMac.app（ad-hoc 签名）
+scripts/dev-bundle.sh # 开发打包为 build/MyMac.app（Bundle ID com.hubertshelley.mymac.dev）
+scripts/release-bundle.sh # 正式打包：签名 + 公证 + 装订票据，产出 build/release/
 poc/egui-poc/         # M0 技术验证记录（不参与构建）
 docs/                 # 需求、迁移方案、旧实现参考（docs/legacy-reference）
 ```
@@ -29,3 +30,22 @@ cargo test -p mymac-core --lib
 ```
 
 GUI 必须以 `.app` 形式启动；直接运行裸二进制在受限终端里会静默退出。迁移进度见 `TODO.md`，方案见 `docs/egui-migration.md`。
+
+## 正式打包与公证
+
+正式 Bundle ID 为 `com.hubertshelley.mymac`，使用 Developer ID Application 证书签名（hardened runtime + 安全时间戳）后提交公证。公证凭据只存在钥匙串 profile 里，仓库不保存密码：
+
+```bash
+# 一次性：保存公证凭据（App 专用密码在 appleid.apple.com 生成）
+xcrun notarytool store-credentials mymac-notary \
+    --apple-id <Apple ID> --team-id SE3EQ3A77S --password <App 专用密码>
+
+# 打包：签名 → 公证 → stapler 装订 → build/release/MyMac-<版本>.zip
+NOTARY_PROFILE=mymac-notary ./scripts/release-bundle.sh
+```
+
+不设置 `NOTARY_PROFILE` 时只签名、不公证。签名需要能访问 Apple 时间戳服务。
+
+从旧版（`com.mymac.manager`）升级时：
+- 首次启动会自动把 `~/Library/Caches/com.mymac.manager/` 迁移到 `com.hubertshelley.mymac`；粘贴板历史、配置（`~/Library/Application Support/MyMac/`）和 2FA 账户（`~/.mymac/`）路径不变。
+- 签名身份变了，需要在「系统设置 → 隐私与安全性 → 屏幕录制」重新授权一次；首次读取 2FA 钥匙串时选「始终允许」。之后升级不再弹窗。

@@ -336,8 +336,9 @@ impl Overlay {
                     egui::vec2(w.width as f32, w.height as f32),
                 )
             })
-            // CGWindowListCopyWindowInfo 按从前到后排列：第一个命中的就是最上层窗口
-            .find(|r| r.contains(pos))
+            .filter(|r| r.contains(pos))
+            // 与旧版 / 需求一致：包含光标的最小面积窗口优先（便于选中被大窗口包住的小窗口）
+            .min_by(|a, b| a.area().total_cmp(&b.area()))
     }
 }
 

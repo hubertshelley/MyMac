@@ -90,11 +90,17 @@
   - [x] 重复触发：覆盖层任意状态下再触发，重新抓屏替换旧会话
   - [x] 会话焦点：抓屏前移出主窗口、激活应用拿键盘焦点，结束后恢复主窗口或交还焦点；保存面板弹出前降低覆盖层层级
   - [x] 工具栏放选区下方右对齐（放不下时上方），提示 toast；选区限制在单块屏幕内（暂不支持跨屏）
-  - [x] 悬停窗口取最上层（CGWindowList 从前到后排列，之前误取最底层）
+  - [x] 悬停窗口按需求取「包含光标的最小面积窗口」（之前误取列表最后一个命中，即最底层窗口）
 - [x] M6 贴图：工具栏「贴图」按钮合成选区生成置顶小窗（可多张共存，独立于覆盖层常驻）
   - [x] 拖动移动；滚轮缩放（每格 ×1.1，0.12–6 倍）；初始尺寸限制在 1100×760 内保持比例
   - [x] 双击 / Esc / 悬停关闭按钮关闭；右键菜单：复制到剪贴板 / 关闭贴图
 - [ ] M7 打包切换（Bundle ID `com.hubertshelley.mymac` + Developer ID 签名与公证）
+  - [x] `scripts/release-bundle.sh`：release 构建、正式 Info.plist、`codesign --options runtime --timestamp`、
+    `notarytool submit --wait`（钥匙串 profile `NOTARY_PROFILE`）、`stapler staple`、zip 产物
+  - [x] 首次启动迁移缓存目录 `com.mymac.manager` → `com.hubertshelley.mymac`（`mymac-core::paths`，含单测）
+  - [x] README / PLAN 更新打包与升级说明
+  - [ ] 真机执行一次公证打包（需本机 `notarytool store-credentials` 保存凭据；沙箱无法访问时间戳服务）
+  - [ ] 覆盖安装验证：屏幕录制重新授权一次、2FA 钥匙串「始终允许」后再次升级不再弹窗
 
 ## 后续阶段（v0.2）
 

@@ -24,6 +24,7 @@
 | 业务内核 | crates/mymac-core（不依赖 UI 框架） |
 | 资源采集 | sysinfo |
 | 系统交互 | launchctl / NSWorkspace / 文件系统 / objc2 |
+| 打包分发 | Bundle ID `com.hubertshelley.mymac`，Developer ID 签名 + hardened runtime + 公证（`scripts/release-bundle.sh`） |
 ## 架构说明
 - **界面（egui）**：根应用实现 `eframe::App` 的 `logic`/`ui`；窗口隐藏时仅 `logic` 运行，托盘与 F1 事件在其中消费。
 - **内核（mymac-core）**：通过 `EventSink` 上报进度类事件，界面层决定如何消费与唤醒。
@@ -32,7 +33,7 @@
 
 ### v0.1（基础雏形）
 
-- 搭建 Tauri 2 + Vue 3 项目骨架
+- 搭建 Tauri 2 + Vue 3 项目骨架（已迁移到 egui，见 `docs/egui-migration.md`）
 - 实现系统资源监控（CPU / 内存 / 磁盘 / 网络）
 - 实现应用列表展示与卸载
 - 实现启动项列表与启用/禁用
