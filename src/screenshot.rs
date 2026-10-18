@@ -67,7 +67,10 @@ pub struct Tile {
     pub rgba: Vec<u8>,
     pub px_width: usize,
     pub px_height: usize,
-    pub texture: egui::TextureHandle,
+    /// 冻结背景纹理。必须在覆盖层视口自己的 pass 里创建：eframe 只在视口可见时上传
+    /// 该 pass 的纹理增量，若在主窗口（隐藏 / 被遮挡）的 logic 里 load_texture，
+    /// 增量会被丢弃，GPU 上缺纹理，覆盖层只剩遮罩而整屏发黑。
+    pub texture: Option<egui::TextureHandle>,
 }
 
 impl Tile {
@@ -411,18 +414,16 @@ impl ScreenshotManager {
 
         let windows = winlist::list_on_screen_windows();
         let mut tiles = Vec::with_capacity(displays.len());
-        for (index, display) in displays.iter().enumerate() {
+        for display in &displays {
             match capture::grab_display_rgba(display.id) {
                 Ok(grab) => {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [grab.width, grab.height],
-                        &grab.rgba,
-                    );
-                    let texture = ctx.load_texture(
-                        format!("screenshot-bg-{}-{}", display.id, index),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
+                    diag(format!(
+                        "抓屏 display={} {}x{} 像素统计：{}",
+                        display.id,
+                        grab.width,
+                        grab.height,
+                        pixel_stats(&grab.rgba)
+                    ));
                     tiles.push(Tile {
                         display_id: display.id,
                         rect: egui::Rect::from_min_size(
@@ -433,7 +434,7 @@ impl ScreenshotManager {
                         rgba: grab.rgba,
                         px_width: grab.width,
                         px_height: grab.height,
-                        texture,
+                        texture: None,
                     });
                 }
                 Err(error) => diag(format!("抓取显示器 {} 失败：{error}", display.id)),
@@ -540,6 +541,29 @@ impl ScreenshotManager {
     }
 }
 
+/// 抓屏结果的抽样统计（平均亮度、平均 alpha、纯黑占比），用于诊断黑屏。
+fn pixel_stats(rgba: &[u8]) -> String {
+    let pixels = rgba.as_chunks::<4>().0;
+    let step = (pixels.len() / 4096).max(1);
+    let (mut n, mut luma, mut alpha, mut black) = (0u64, 0u64, 0u64, 0u64);
+    for p in pixels.iter().step_by(step) {
+        n += 1;
+        let l = (u64::from(p[0]) * 3 + u64::from(p[1]) * 6 + u64::from(p[2])) / 10;
+        luma += l;
+        alpha += u64::from(p[3]);
+        if l < 8 {
+            black += 1;
+        }
+    }
+    let n = n.max(1);
+    format!(
+        "luma={} alpha={} black={}%",
+        luma / n,
+        alpha / n,
+        black * 100 / n
+    )
+}
+
 /// 选区 8 个控制点（全局逻辑坐标）。
 fn handle_points(sel: egui::Rect) -> [(Handle, egui::Pos2); 8] {
     let c = |x: f32, y: f32| egui::pos2(x, y);
@@ -622,14 +646,28 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
                 return;
             }
             // 先提取本显示器的静态数据，避免与后续可变借用冲突
-            let Some((tile_rect, scale, texture_id)) = overlay
+            let Some(tile) = overlay
                 .tiles
-                .iter()
+                .iter_mut()
                 .find(|t| t.display_id == display_id)
-                .map(|t| (t.rect, t.scale, t.texture.id()))
             else {
                 return;
             };
+            let texture_id = tile
+                .texture
+                .get_or_insert_with(|| {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [tile.px_width, tile.px_height],
+                        &tile.rgba,
+                    );
+                    ctx.load_texture(
+                        format!("screenshot-bg-{display_id}"),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .id();
+            let (tile_rect, scale) = (tile.rect, tile.scale);
             let painter = ui.painter().clone();
 
             // 冻结背景（uv 必须归一化到 0..1，否则越界采样导致整屏取到边缘 texel 而变色/失真）
