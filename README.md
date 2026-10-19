@@ -15,8 +15,7 @@ Cargo.toml            # 应用 crate + workspace
 src/                  # egui 应用：main / app / theme / tray / hotkey / event / macos
 crates/mymac-core/    # 业务内核（system、apps、launch、brew、clipboard、totp、ocr、screenshot 后端）
 assets/               # 应用图标
-scripts/dev-bundle.sh # 开发打包为 build/MyMac.app（Bundle ID com.hubertshelley.mymac.dev）
-scripts/release-bundle.sh # 正式打包：签名 + 公证 + 装订票据，产出 build/release/
+scripts/bundle.sh     # 打包：默认开发包 build/MyMac.app；release 为签名 + 公证的正式包 build/release/
 poc/egui-poc/         # M0 技术验证记录（不参与构建）
 docs/                 # 需求、迁移方案、旧实现参考（docs/legacy-reference）
 ```
@@ -26,7 +25,7 @@ docs/                 # 需求、迁移方案、旧实现参考（docs/legacy-re
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p mymac-core --lib
-./scripts/dev-bundle.sh   # 生成 build/MyMac.app，再用 open 启动
+./scripts/bundle.sh       # 生成 build/MyMac.app（Bundle ID com.hubertshelley.mymac.dev），再用 open 启动
 ```
 
 GUI 必须以 `.app` 形式启动；直接运行裸二进制在受限终端里会静默退出。迁移进度见 `TODO.md`，方案见 `docs/egui-migration.md`。
@@ -41,10 +40,12 @@ xcrun notarytool store-credentials mymac-notary \
     --apple-id <Apple ID> --team-id SE3EQ3A77S --password <App 专用密码>
 
 # 打包：签名 → 公证 → stapler 装订 → build/release/MyMac-<版本>.zip
-NOTARY_PROFILE=mymac-notary ./scripts/release-bundle.sh
+NOTARY_PROFILE=mymac-notary ./scripts/bundle.sh release
 ```
 
 不设置 `NOTARY_PROFILE` 时只签名、不公证。签名需要能访问 Apple 时间戳服务。
+
+两种模式都会用 `--remap-path-prefix` 把本机路径（含用户名）从二进制中去掉，并在签名前自检，残留即中止打包。
 
 从旧版（`com.mymac.manager`）升级时：
 - 首次启动会自动把 `~/Library/Caches/com.mymac.manager/` 迁移到 `com.hubertshelley.mymac`；粘贴板历史、配置（`~/Library/Application Support/MyMac/`）和 2FA 账户（`~/.mymac/`）路径不变。

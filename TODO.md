@@ -95,7 +95,7 @@
   - [x] 拖动移动（系统原生拖动）；滚轮缩放（每格 ×1.1）与触控板双指捏合缩放（0.12–6 倍，且不超过所在屏幕）；初始尺寸与选区 1:1，任一边超过屏幕 80% 时等比缩小；缩放始终保持截图宽高比
   - [x] 双击 / Esc / 悬停关闭按钮关闭；右键菜单：复制到剪贴板 / 关闭贴图
 - [ ] M7 打包切换（Bundle ID `com.hubertshelley.mymac` + Developer ID 签名与公证）
-  - [x] `scripts/release-bundle.sh`：release 构建、正式 Info.plist、`codesign --options runtime --timestamp`、
+  - [x] `scripts/bundle.sh release`：release 构建、正式 Info.plist、`codesign --options runtime --timestamp`、
     `notarytool submit --wait`（钥匙串 profile `NOTARY_PROFILE`）、`stapler staple`、zip 产物
   - [x] 首次启动迁移缓存目录 `com.mymac.manager` → `com.hubertshelley.mymac`（`mymac-core::paths`，含单测）
   - [x] README / PLAN 更新打包与升级说明

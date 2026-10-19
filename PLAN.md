@@ -24,7 +24,7 @@
 | 业务内核 | crates/mymac-core（不依赖 UI 框架） |
 | 资源采集 | sysinfo |
 | 系统交互 | launchctl / NSWorkspace / 文件系统 / objc2 |
-| 打包分发 | Bundle ID `com.hubertshelley.mymac`，Developer ID 签名 + hardened runtime + 公证（`scripts/release-bundle.sh`） |
+| 打包分发 | Bundle ID `com.hubertshelley.mymac`，Developer ID 签名 + hardened runtime + 公证（`scripts/bundle.sh release`） |
 ## 架构说明
 - **界面（egui）**：根应用实现 `eframe::App` 的 `logic`/`ui`；窗口隐藏时仅 `logic` 运行，托盘与 F1 事件在其中消费。
 - **内核（mymac-core）**：通过 `EventSink` 上报进度类事件，界面层决定如何消费与唤醒。
