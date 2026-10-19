@@ -9,8 +9,6 @@ publish = false
 [workspace]
 resolver = "2"
 members = [".", "crates/mymac-core"]
-# poc 独立构建，保留作 M0 验证记录，不纳入 workspace
-exclude = ["poc/egui-poc"]
 
 [dependencies]
 mymac-core = { path = "crates/mymac-core" }

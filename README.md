@@ -16,7 +16,6 @@ src/                  # egui 应用：main / app / theme / tray / hotkey / event
 crates/mymac-core/    # 业务内核（system、apps、launch、brew、clipboard、totp、ocr、screenshot 后端）
 assets/               # 应用图标
 scripts/bundle.sh     # 打包：默认开发包 build/MyMac.app；release 为签名 + 公证的正式包；install 打包并安装启动
-poc/egui-poc/         # M0 技术验证记录（不参与构建）
 docs/                 # 需求、迁移方案、旧实现参考（docs/legacy-reference）
 ```
 

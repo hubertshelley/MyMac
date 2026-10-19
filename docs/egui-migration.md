@@ -324,7 +324,7 @@ git diff --check
 
 ## 9. M0 技术验证结论（2026-10-16）
 
-PoC 位置：`poc/egui-poc/`（分支 `feature/egui-rewrite`，`src-tauri` 未改动）。构建：`cargo build --release`，再复制进 `MyMacPoC.app` 并 `codesign`。GUI 必须以 `.app` 形式启动，裸二进制在终端沙箱里会静默退出。
+PoC 位置：原 `poc/egui-poc/`，已在 M7 后删除，需要时可从提交 `22ae238` 恢复（`git checkout 22ae238 -- poc/egui-poc`）。构建：`cargo build --release`，再复制进 `MyMacPoC.app` 并 `codesign`。GUI 必须以 `.app` 形式启动，裸二进制在终端沙箱里会静默退出。
 
 | 验证项 | 结果 | 说明 |
 | --- | --- | --- |
