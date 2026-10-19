@@ -7,6 +7,9 @@
 #                                     #   时间戳服务不可达时退回无时间戳 / ad-hoc 签名，便于本地与沙箱调试
 #   bash scripts/bundle.sh release    # 正式包：release 构建 → build/release/MyMac.app + MyMac-<版本>.zip
 #                                     #   Bundle ID com.hubertshelley.mymac；签名必须带安全时间戳，失败即中止
+#   bash scripts/bundle.sh install    # 本机安装：先完整执行 release，再退出正在运行的 MyMac →
+#                                     #   覆盖安装到 /Applications/MyMac.app → 启动
+#                                     #   可用 INSTALL_DIR 改安装目录（如 INSTALL_DIR=~/Applications）
 #
 # 正式包公证凭据只从钥匙串 profile 读取，不在脚本或仓库里保存任何密码：
 #   xcrun notarytool store-credentials "mymac-notary" \
@@ -27,17 +30,29 @@ case "$MODE" in
         CARGO_PROFILE="debug"
         OUT="$PWD/build"
         ;;
-    release)
+    release|install)
         BUNDLE_ID="com.hubertshelley.mymac"
         DISPLAY_NAME="MyMac"
         CARGO_PROFILE="release"
         OUT="$PWD/build/release"
         ;;
     *)
-        echo "用法：bash scripts/bundle.sh [dev|release]" >&2
+        echo "用法：bash scripts/bundle.sh [dev|release|install]" >&2
         exit 2
         ;;
 esac
+# install 的打包部分与 release 完全一致，只在最后多出安装步骤
+INSTALL=false
+if [ "$MODE" = "install" ]; then
+    INSTALL=true
+    MODE="release"
+    INSTALL_DIR="${INSTALL_DIR:-/Applications}"
+    # 打包前先确认能写入，避免编译签名完才发现装不上
+    if [ ! -w "$INSTALL_DIR" ]; then
+        echo "安装目录不可写：${INSTALL_DIR}（可改用 INSTALL_DIR=~/Applications）" >&2
+        exit 1
+    fi
+fi
 
 metadata() { cargo metadata --no-deps --format-version 1; }
 VERSION="$(metadata | python3 -c 'import sys,json;print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="mymac"))')"
@@ -154,4 +169,36 @@ else
     # open 对同 bundle id 只会唤出已运行进程；先结束旧实例，否则看不到本次改动
     killall MyMac 2>/dev/null && echo "已结束旧 MyMac 实例；重新 open 将启动本次新构建" || true
     echo "$APP"
+fi
+
+# ---- 5. 本机安装（仅 install 模式）：退出旧程序 → 覆盖安装 → 启动 ----
+if [ "$INSTALL" = true ]; then
+    DEST="$INSTALL_DIR/MyMac.app"
+    DEST_EXE="$DEST/Contents/MacOS/"
+
+    # 退出正在运行的已安装版本。MyMac 常驻托盘，「Quit」/ AppleScript quit 只会隐藏窗口，
+    # 外部只能发信号：先 SIGTERM，最多等 10 秒，仍在就 SIGKILL。
+    # 按安装目录内的可执行文件路径匹配（兼容旧版不同的可执行文件名），不影响 build/ 下的开发包。
+    PIDS="$(pgrep -f "$DEST_EXE" || true)"
+    if [ -n "$PIDS" ]; then
+        echo "正在退出旧版 MyMac（pid $(echo $PIDS)）"
+        kill $PIDS 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            pgrep -f "$DEST_EXE" >/dev/null || break
+            sleep 0.5
+        done
+        if pgrep -f "$DEST_EXE" >/dev/null; then
+            echo "旧版 10 秒内未退出，强制结束" >&2
+            pkill -9 -f "$DEST_EXE" || true
+            sleep 1
+        fi
+    fi
+
+    rm -rf "$DEST"
+    ditto "$APP" "$DEST"
+    LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
+    echo "已安装到 $DEST"
+    open "$DEST"
+    echo "已启动 MyMac"
 fi

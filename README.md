@@ -15,7 +15,7 @@ Cargo.toml            # 应用 crate + workspace
 src/                  # egui 应用：main / app / theme / tray / hotkey / event / macos
 crates/mymac-core/    # 业务内核（system、apps、launch、brew、clipboard、totp、ocr、screenshot 后端）
 assets/               # 应用图标
-scripts/bundle.sh     # 打包：默认开发包 build/MyMac.app；release 为签名 + 公证的正式包 build/release/
+scripts/bundle.sh     # 打包：默认开发包 build/MyMac.app；release 为签名 + 公证的正式包；install 打包并安装启动
 poc/egui-poc/         # M0 技术验证记录（不参与构建）
 docs/                 # 需求、迁移方案、旧实现参考（docs/legacy-reference）
 ```
@@ -44,6 +44,15 @@ NOTARY_PROFILE=mymac-notary ./scripts/bundle.sh release
 ```
 
 不设置 `NOTARY_PROFILE` 时只签名、不公证。签名需要能访问 Apple 时间戳服务。
+
+本机自用一条命令完成「打正式包 → 退出正在运行的 MyMac → 覆盖安装到 `/Applications` → 启动」：
+
+```bash
+./scripts/bundle.sh install                       # 本机自用不需要公证
+INSTALL_DIR=~/Applications ./scripts/bundle.sh install   # 可选：换安装目录
+```
+
+旧版先收到 SIGTERM，10 秒内未退出会被强制结束；只结束安装目录里的 MyMac，不影响 `build/` 下的开发包。
 
 两种模式都会用 `--remap-path-prefix` 把本机路径（含用户名）从二进制中去掉，并在签名前自检，残留即中止打包。
 
