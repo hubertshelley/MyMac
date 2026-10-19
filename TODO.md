@@ -73,7 +73,7 @@
 
 方案见 `docs/egui-migration.md`，分支 `feature/egui-rewrite`。
 
-- [x] M0 技术验证（`poc/egui-poc`）：托盘、F1、覆盖层、Dock 显隐、中文与图标渲染均通过
+- [x] M0 技术验证（PoC 代码已删除，可从 git 历史 `22ae238` 恢复）：托盘、F1、覆盖层、Dock 显隐、中文与图标渲染均通过
 - [x] M1 core 抽离：业务模块迁入 `crates/mymac-core`，去掉 Tauri 类型
 - [x] M1.5 删除 Vue 前端与 Tauri 壳，根目录改为 egui 应用，eframe 降至 0.34，接入 shadcn-egui（主题、中文字体、深浅切换已验证；托盘与 F1 待真人复验）
 - [x] M2 应用骨架：侧边栏导航、托盘菜单完整（粘贴板/2FA 子菜单、2 秒刷新、状态栏图标）、资源监控页；截图入口待 M5
