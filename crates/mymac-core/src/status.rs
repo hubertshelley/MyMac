@@ -51,17 +51,6 @@ fn icon_font() -> &'static Font {
     })
 }
 
-/// 检测系统是否处于深色模式
-fn is_dark_mode() -> bool {
-    std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim() == "Dark")
-        .unwrap_or(false)
-}
-
 /// 加载并缩放应用 Logo（彩色）
 fn logo_rgba() -> &'static (Vec<u8>, u32, u32) {
     static LOGO: OnceLock<(Vec<u8>, u32, u32)> = OnceLock::new();
@@ -92,7 +81,6 @@ pub fn format_rate(bytes_per_sec: f64) -> String {
     }
 }
 
-/// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 字体图标指标）
 /// RGBA 位图：宽、高与像素数据，由 UI 层转为托盘图标或纹理。
 pub struct RgbaIcon {
     pub rgba: Vec<u8>,
@@ -100,9 +88,17 @@ pub struct RgbaIcon {
     pub height: u32,
 }
 
-pub fn render_status_icon(info: &SystemInfo, config: &StatusConfig) -> RgbaIcon {
-    let dark = is_dark_mode();
-    let color = if dark { 255u8 } else { 0u8 };
+/// 根据配置与系统快照渲染状态栏图标（彩色 Logo + 字体图标指标）。
+///
+/// `dark_menu_bar` 指菜单栏本身是否为深色外观，不是系统的深色模式：macOS 菜单栏会随壁纸
+/// 呈现浅色或深色，深色模式下配浅色壁纸时菜单栏是浅色的，需画深色文字。由 UI 层读取
+/// 状态栏按钮的 effectiveAppearance 传入。
+pub fn render_status_icon(
+    info: &SystemInfo,
+    config: &StatusConfig,
+    dark_menu_bar: bool,
+) -> RgbaIcon {
+    let color = if dark_menu_bar { 255u8 } else { 0u8 };
 
     let mut segments: Vec<Segment> = Vec::new();
     if config.show_logo {

@@ -24,6 +24,8 @@ const PREFIX_TOTP: &str = "totp-item-";
 /// 托盘菜单：持有各菜单项句柄，供刷新时修改文字。仅限主线程使用。
 pub struct Tray {
     icon: TrayIcon,
+    /// 上一次读到的菜单栏外观是否为深色；读不到时沿用
+    dark_menu_bar: std::cell::Cell<bool>,
     cpu: MenuItem,
     mem: MenuItem,
     net: MenuItem,
@@ -56,9 +58,11 @@ impl Tray {
             &quit,
         ])?;
 
+        // 状态项创建前读不到菜单栏外观，先按深色画一版，创建后立刻按实际外观重画
         let initial = status::render_status_icon(
             &shared.monitor.lock().unwrap().snapshot(),
             &shared.config.lock().unwrap(),
+            true,
         );
         let icon = TrayIconBuilder::new()
             .with_id("main-tray")
@@ -70,12 +74,17 @@ impl Tray {
 
         let tray = Self {
             icon,
+            dark_menu_bar: std::cell::Cell::new(true),
             cpu,
             mem,
             net,
             clip_menu,
             totp_menu,
         };
+        if !tray.menu_bar_is_dark() {
+            let info = shared.monitor.lock().unwrap().snapshot();
+            tray.redraw_icon(&info, shared);
+        }
         tray.rebuild_clip_menu(shared);
         tray.rebuild_totp_menu(shared);
         Ok(tray)
@@ -95,11 +104,30 @@ impl Tray {
             status::format_rate(info.net_down_rate),
             status::format_rate(info.net_up_rate)
         ));
+        self.redraw_icon(info, shared);
+        self.update_totp_menu(shared);
+    }
+
+    /// 按菜单栏当前外观重画状态栏图标。每次刷新都重新读取外观：菜单栏会随壁纸、
+    /// 深浅色模式切换、全屏应用改变深浅，最多 2 秒内跟上。
+    fn redraw_icon(&self, info: &SystemInfo, shared: &Shared) {
+        let dark = self.menu_bar_is_dark();
         let config = shared.config.lock().unwrap().clone();
-        if let Ok(icon) = to_icon(status::render_status_icon(info, &config)) {
+        if let Ok(icon) = to_icon(status::render_status_icon(info, &config, dark)) {
             let _ = self.icon.set_icon(Some(icon));
         }
-        self.update_totp_menu(shared);
+    }
+
+    fn menu_bar_is_dark(&self) -> bool {
+        if let Some(dark) = self
+            .icon
+            .ns_status_item()
+            .and_then(|item| crate::macos::status_item_is_dark(&item))
+            && self.dark_menu_bar.replace(dark) != dark
+        {
+            crate::screenshot::diag(format!("菜单栏外观变化：dark={dark}"));
+        }
+        self.dark_menu_bar.get()
     }
 
     /// 重建「粘贴板历史」子菜单。先克隆数据、释放锁，再操作菜单。

@@ -156,3 +156,23 @@ pub fn set_dock_visible(visible: bool) {
     };
     app.setActivationPolicy(policy);
 }
+
+/// 状态栏按钮当前呈现的是否为深色外观。
+///
+/// 不能用 `defaults read -g AppleInterfaceStyle`（系统深色模式）判断：macOS 菜单栏会随壁纸
+/// 呈现浅色或深色，深色模式 + 浅色壁纸时菜单栏是浅色的，按深色模式画白字就看不清。
+/// 状态栏按钮的 effectiveAppearance 才是菜单栏实际的外观（Aqua / DarkAqua 及其 Vibrant 变体）。
+/// 取不到按钮（未在主线程或状态项尚未创建）时返回 None，由调用方保留上一次的结果。
+pub fn status_item_is_dark(item: &objc2_app_kit::NSStatusItem) -> Option<bool> {
+    use objc2_app_kit::{
+        NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    };
+    use objc2_foundation::NSArray;
+    let mtm = MainThreadMarker::new()?;
+    let button = item.button(mtm)?;
+    let appearance = button.effectiveAppearance();
+    let candidates =
+        unsafe { NSArray::from_slice(&[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) };
+    let best = appearance.bestMatchFromAppearancesWithNames(&candidates)?;
+    Some(&*best == unsafe { NSAppearanceNameDarkAqua })
+}

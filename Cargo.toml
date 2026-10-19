@@ -38,11 +38,17 @@ chrono = "0.4"     # 截图保存默认文件名的时间戳（core 已依赖，
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "NSAppearance",
     "NSApplication",
+    "NSButton",
+    "NSControl",
     "NSImage",
     "NSResponder",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
 ] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData"] }
 
 [profile.release]
 strip = true
