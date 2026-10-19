@@ -14,7 +14,9 @@ BUNDLE_ID="com.hubertshelley.mymac"
 VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import sys,json;print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="mymac"))')"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)}"
 
-cargo build --release -p mymac --bin mymac
+# 去掉二进制里的本机绝对路径，见 scripts/lib/path-remap.sh
+source scripts/lib/path-remap.sh
+cargo build --release -p mymac --bin mymac "${PATH_REMAP_ARGS[@]}"
 
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import sys,json;print(json.load(sys.stdin)["target_directory"])')"
 OUT="$PWD/build/release"
@@ -23,6 +25,7 @@ ZIP="$OUT/MyMac-$VERSION.zip"
 rm -rf "$APP" "$ZIP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET_DIR/release/mymac" "$APP/Contents/MacOS/MyMac"
+assert_no_home_paths "$APP/Contents/MacOS/MyMac"
 cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST

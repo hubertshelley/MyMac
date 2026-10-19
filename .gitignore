@@ -34,5 +34,9 @@ dist-ssr
 poc/egui-poc/*.app/
 poc/egui-poc/target/
 
-# 开发打包产物
+# 打包制品：dev-bundle.sh → build/MyMac.app，release-bundle.sh → build/release/（.app + zip）
 /build/
+# 任何位置意外产出的打包制品也不入库
+*.app/
+*.dmg
+*.dSYM/

@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
-# 开发用：构建并打成 build/MyMac.app（ad-hoc 签名，build/ 已 gitignore）。
+# 开发用：构建并打成 build/MyMac.app（build/ 已 gitignore）。
 # GUI 程序必须以 .app 形式启动，裸二进制在终端沙箱里会静默退出。
-# 正式打包（Developer ID 签名 + 公证）见 M7 的 xtask，这里不处理。
+# 正式打包（Developer ID 签名 + 公证）见 scripts/release-bundle.sh，这里不处理。
+# 本机路径脱敏与正式包一致（scripts/lib/path-remap.sh），开发包传出去也不会暴露用户名。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${1:-debug}"
-if [ "$PROFILE" = "release" ]; then cargo build --release; else cargo build; fi
+source scripts/lib/path-remap.sh
+if [ "$PROFILE" = "release" ]; then
+    cargo build --release "${PATH_REMAP_ARGS[@]}"
+else
+    cargo build "${PATH_REMAP_ARGS[@]}"
+fi
 
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import sys,json;print(json.load(sys.stdin)["target_directory"])')"
 APP="$PWD/build/MyMac.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET_DIR/$PROFILE/mymac" "$APP/Contents/MacOS/MyMac"
+assert_no_home_paths "$APP/Contents/MacOS/MyMac"
 cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
