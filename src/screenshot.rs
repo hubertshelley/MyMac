@@ -305,6 +305,14 @@ struct Overlay {
     /// 贴图列表（常驻，独立于覆盖层显隐）
     pins: Vec<PinImage>,
     pin_seq: u32,
+    /// 重复触发截图时被替换的旧 tiles 暂存区。
+    ///
+    /// `Tile::texture` 的 drop 只是把纹理 id 放进 `textures_delta.free`，
+    /// 该 delta 由下一个 pass 的渲染消费；eframe 对隐藏视口跳过
+    /// `paint_and_update_textures`，free 会被整包丢弃，纹理永久驻留。
+    /// 因此旧 tiles 不能在隐藏 pass 里 drop，必须暂存到覆盖层仍可见的
+    /// pass 中清除（见 `overlay_viewport`），让 free 被当场消费。
+    retired_tiles: Vec<Tile>,
     /// 会话序号：每次开始 / 结束截图递增，丢弃过期的 OCR 结果
     session: u64,
     ocr: OcrState,
@@ -351,6 +359,13 @@ impl Overlay {
         self.ocr = OcrState::Idle;
         self.toast = None;
         self.session += 1;
+        // 本函数只在覆盖层视口自己的 ui 回调内被调用，此刻该视口仍可见
+        // （Visible(false) 命令要等本 pass 渲染完才被消费），本 pass 的
+        // paint 一定会执行并消费 textures_delta.free——在这里 drop 纹理
+        // 才能真正释放，放到隐藏 pass 里 free 会被 eframe 整包丢弃。
+        self.tiles.clear();
+        self.windows.clear();
+        self.retired_tiles.clear();
         for id in ids {
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(false));
         }
@@ -404,6 +419,7 @@ impl ScreenshotManager {
                 move_ref: None,
                 pins: Vec::new(),
                 pin_seq: 0,
+                retired_tiles: Vec::new(),
                 session: 0,
                 ocr: OcrState::Idle,
                 toast: None,
@@ -490,6 +506,13 @@ impl ScreenshotManager {
             } else {
                 main_visible
             };
+            // 旧 tiles 的纹理不能在这里 drop：start() 在主窗口（隐藏视口）
+            // 的 logic() 里执行，本 pass 不会消费 textures_delta.free。
+            // 暂存到 retired_tiles，等覆盖层下一帧可见 pass 里清除。
+            if !overlay.tiles.is_empty() {
+                let mut old = std::mem::take(&mut overlay.tiles);
+                overlay.retired_tiles.append(&mut old);
+            }
             overlay.tiles = tiles;
             overlay.windows = windows;
             overlay.origin = None;
@@ -685,6 +708,12 @@ fn overlay_viewport(display_id: u32, state: &Arc<Mutex<Overlay>>, ui: &mut egui:
             let mut overlay = state.lock().unwrap();
             if !overlay.visible {
                 return;
+            }
+            // 覆盖层可见的 pass 里清除暂存的旧 tiles：此刻 paint 一定会
+            // 执行，TextureHandle drop 产生的 textures_delta.free 会被
+            // 当场消费，纹理真正释放。
+            if !overlay.retired_tiles.is_empty() {
+                overlay.retired_tiles.clear();
             }
             // 先提取本显示器的静态数据，避免与后续可变借用冲突
             let Some(tile) = overlay
